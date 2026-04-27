@@ -45,6 +45,9 @@ checkpointing:
   every_n_train_steps: null
   train_time_interval: 10
   pretrained_model: null
+  monitor: val/psnr_val
+  mode: max
+  save_top_k: 1
 
 train:
   depth_mode: null

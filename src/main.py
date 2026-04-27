@@ -18,21 +18,39 @@ from pytorch_lightning.callbacks import (
 from pytorch_lightning.loggers.wandb import WandbLogger
 
 
-# Configure beartype and jaxtyping.
-with install_import_hook(
-    ("src",),
-    ("beartype", "beartype"),
-):
+runtime_typecheck_disabled = (
+    os.getenv("PANSPLAT_DISABLE_RUNTIME_TYPECHECK", "0") == "1"
+)
+
+if runtime_typecheck_disabled:
     from src.config import load_typed_root_config
     from src.dataset.data_module import DataModule
     from src.global_cfg import set_cfg
     from src.loss import get_losses
     from src.misc.LocalLogger import LocalLogger
+    from src.misc.step_progress_logger import StepProgressLogger
     from src.misc.step_tracker import StepTracker
     from src.misc.wandb_tools import update_checkpoint_path
     from src.model.decoder import get_decoder
     from src.model.encoder import get_encoder
     from src.model.model_wrapper import ModelWrapper
+else:
+    # Configure beartype and jaxtyping.
+    with install_import_hook(
+        ("src",),
+        ("beartype", "beartype"),
+    ):
+        from src.config import load_typed_root_config
+        from src.dataset.data_module import DataModule
+        from src.global_cfg import set_cfg
+        from src.loss import get_losses
+        from src.misc.LocalLogger import LocalLogger
+        from src.misc.step_progress_logger import StepProgressLogger
+        from src.misc.step_tracker import StepTracker
+        from src.misc.wandb_tools import update_checkpoint_path
+        from src.model.decoder import get_decoder
+        from src.model.encoder import get_encoder
+        from src.model.model_wrapper import ModelWrapper
 
 
 def cyan(text: str) -> str:
@@ -96,8 +114,20 @@ def train(cfg_dict: DictConfig):
             train_time_interval=train_time_interval,
         )
     )
+    if cfg.checkpointing.monitor is not None and cfg.checkpointing.save_top_k > 0:
+        callbacks.append(
+            ModelCheckpoint(
+                checkpoint_folder,
+                monitor=cfg.checkpointing.monitor,
+                mode=cfg.checkpointing.mode,
+                save_top_k=cfg.checkpointing.save_top_k,
+                filename="best-{epoch:02d}-{step:06d}",
+                auto_insert_metric_name=False,
+            )
+        )
     for cb in callbacks:
         cb.CHECKPOINT_EQUALS_CHAR = '_'
+    callbacks.append(StepProgressLogger(cfg.train.print_log_every_n_steps))
 
     # Prepare the checkpoint for loading.
     checkpoint_path = update_checkpoint_path(
@@ -132,6 +162,7 @@ def train(cfg_dict: DictConfig):
         devices="auto",
         strategy="ddp" if torch.cuda.device_count() > 1 else "auto",
         callbacks=callbacks,
+        log_every_n_steps=max(1, cfg.train.print_log_every_n_steps),
         val_check_interval=cfg.trainer.val_check_interval,
         check_val_every_n_epoch=cfg.trainer.check_val_every_n_epoch,
         enable_progress_bar=True,

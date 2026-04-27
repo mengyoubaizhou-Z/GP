@@ -14,9 +14,21 @@ Vector = Union[
     Shaped[Tensor, "batch 3"],
 ]
 
+Vector2 = Union[
+    Real,
+    Iterable[Real],
+    Shaped[Tensor, "2"],
+    Shaped[Tensor, "batch 2"],
+]
+
+AnyVector = Union[
+    Vector,
+    Vector2,
+]
+
 
 def sanitize_vector(
-    vector: Vector,
+    vector: AnyVector,
     dim: int,
     device: torch.device,
 ) -> Float[Tensor, "*#batch dim"]:

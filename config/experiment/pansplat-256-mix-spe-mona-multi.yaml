@@ -1,0 +1,59 @@
+# @package _global_
+
+defaults:
+  - /model: pansplat
+  - override /loss: [mse, lpips, pyimage]
+  - override /dataset: 360uav_360dvo_360vo
+
+wandb:
+  name: pansplat-256-mix-spe-mona-multi
+  tags: [pansplat, mix, 256x512, spherical-pe, mona-multi, weighted-sum]
+
+data_loader:
+  train:
+    batch_size: 1
+    num_workers: 6
+  val:
+    batch_size: 1
+  test:
+    batch_size: 1
+
+trainer:
+  max_epochs: 20
+  val_check_interval: 0.5
+  precision: 16-mixed
+
+optimizer:
+  lr: 1.e-4
+
+model:
+  weights_path: null
+  encoder:
+    fpn_max_height: 256
+    freeze_mvs: false
+    freeze_backbone: true
+    backbone_position_embedding_type: "spherical"
+    backbone_position_embedding_hidden_dim: 128
+    backbone_use_feature_adapter: false
+    backbone_transformer_adapter_type: "mona_multi"
+    backbone_transformer_adapter_hidden_dim: 64
+    backbone_transformer_adapter_cross_hidden_dim: 128
+    backbone_transformer_adapter_kernel_sizes: [3, 5, 7]
+    backbone_transformer_adapter_fusion: "weighted_sum"
+    backbone_transformer_adapter_use_pointwise: true
+    backbone_transformer_adapter_use_inner_residual: true
+    backbone_transformer_adapter_dropout: 0.1
+    backbone_trainable_modules:
+      - transformer
+      - encoder.downsample3
+      - encoder.conv30
+      - encoder.conv31
+    gaussian_head:
+      deferred_blend: false
+      patchs_height: 1
+      patchs_width: 1
+
+dataset:
+  image_shape: [256, 512]
+  train_times_per_scene: 400
+  cache_images: false

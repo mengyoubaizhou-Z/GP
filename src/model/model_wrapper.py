@@ -508,6 +508,8 @@ class ModelWrapper(LightningModule):
                 if hasattr(self.encoder, 'gaussian_head') and self.encoder.gaussian_head.deferred_blend
                 else None,
             )
+            if isinstance(output_stages, dict):
+                output_stages = [output_stages]
             cols = []
             for i, output_stage in enumerate(output_stages):
                 rgb_stage = output_stage['color'][0]
@@ -528,6 +530,8 @@ class ModelWrapper(LightningModule):
                 break
         if loss_pyimage is not None and batch_idx < self.val_cfg.num_visualize:
             output_stages = loss_pyimage.render(batch, encoder_outputs)
+            if isinstance(output_stages, dict):
+                output_stages = [output_stages]
             cols = []
             for i, output_stage in enumerate(output_stages):
                 rgb_stage = output_stage['color'][0]

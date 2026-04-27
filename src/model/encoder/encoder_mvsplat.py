@@ -51,6 +51,7 @@ class EncoderMVSplatCfg:
     wo_cost_volume: bool
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
+    use_spherical_cost_volume_warp: bool
 
 
 class EncoderMVSplat(Encoder[EncoderMVSplatCfg]):
@@ -105,6 +106,7 @@ class EncoderMVSplat(Encoder[EncoderMVSplatCfg]):
             wo_depth_refine=cfg.wo_depth_refine,
             wo_cost_volume=cfg.wo_cost_volume,
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
+            use_spherical_cost_volume_warp=cfg.use_spherical_cost_volume_warp,
         )
 
     def map_pdf_to_opacity(

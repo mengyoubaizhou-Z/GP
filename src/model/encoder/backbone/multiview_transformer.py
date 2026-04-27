@@ -1,9 +1,48 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 
 from .unimatch.utils import split_feature, merge_splits
-from xformers.ops import memory_efficient_attention
+
+try:
+    from xformers.ops import memory_efficient_attention
+except ImportError:
+    memory_efficient_attention = None
+
+
+def memory_efficient_attention_compat(q, k, v, attn_mask=None):
+    q = q.to(torch.bfloat16).contiguous()
+    k = k.to(torch.bfloat16).contiguous()
+    v = v.to(torch.bfloat16).contiguous()
+    if attn_mask is not None:
+        attn_mask = attn_mask.to(torch.bfloat16).contiguous()
+
+    if memory_efficient_attention is not None:
+        try:
+            return memory_efficient_attention(q, k, v, attn_mask)
+        except NotImplementedError:
+            pass
+
+    q = q.unsqueeze(1)
+    k = k.unsqueeze(1)
+    v = v.unsqueeze(1)
+    if attn_mask is not None:
+        attn_mask = attn_mask.unsqueeze(1)
+
+    with torch.backends.cuda.sdp_kernel(
+        enable_flash=False,
+        enable_mem_efficient=False,
+        enable_math=True,
+    ):
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+        )
+    return out.squeeze(1)
 
 
 def single_head_full_attention(q, k, v):
@@ -138,11 +177,11 @@ def single_head_split_window_attention(
 
         out = torch.matmul(attn, v)  # [B*K*K, H/K*W/K, C]
 
-        out = memory_efficient_attention(
-            q.view(b_new, -1, c).to(torch.bfloat16),
-            k.permute(0, 2, 1).to(torch.bfloat16),
-            v.to(torch.bfloat16),
-            attn_mask.to(torch.bfloat16).repeat(b, 1, 1) if with_shift else None,
+        out = memory_efficient_attention_compat(
+            q.view(b_new, -1, c),
+            k.permute(0, 2, 1),
+            v,
+            attn_mask.repeat(b, 1, 1) if with_shift else None,
         ).type_as(out)
 
         out = merge_splits(
@@ -189,11 +228,11 @@ def single_head_split_window_attention(
         k = split_feature(k, num_splits=num_splits, channel_last=True)
         v = split_feature(v, num_splits=num_splits, channel_last=True)
 
-        out = memory_efficient_attention(
-            q.view(b_new, -1, c).to(torch.bfloat16),
-            k.view(b_new, -1, c).to(torch.bfloat16),
-            v.view(b_new, -1, c).to(torch.bfloat16),
-            attn_mask.to(torch.bfloat16).repeat(b, 1, 1) if with_shift else None,
+        out = memory_efficient_attention_compat(
+            q.view(b_new, -1, c),
+            k.view(b_new, -1, c),
+            v.view(b_new, -1, c),
+            attn_mask.repeat(b, 1, 1) if with_shift else None,
         ).type_as(q)
 
         out = merge_splits(
@@ -288,6 +327,158 @@ def multi_head_split_window_attention(
     out = out.view(b, -1, c)
 
     return out
+
+
+class MonaAdapterLite(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        hidden_dim=64,
+        kernel_size=3,
+        dropout=0.1,
+    ):
+        super().__init__()
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive for MonaAdapterLite")
+        if kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be odd for MonaAdapterLite")
+
+        self.norm = nn.LayerNorm(d_model)
+        self.down = nn.Linear(d_model, hidden_dim)
+        self.depthwise = nn.Conv2d(
+            hidden_dim,
+            hidden_dim,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            groups=hidden_dim,
+        )
+        self.act = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
+        self.up = nn.Linear(hidden_dim, d_model)
+        # Start close to the frozen backbone and let the adapter grow if useful.
+        self.scale = nn.Parameter(torch.tensor(1e-3))
+
+    def forward(self, x, height=None, width=None):
+        if height is None or width is None:
+            raise ValueError("MonaAdapterLite requires spatial height and width")
+
+        b, l, _ = x.shape
+        if l != height * width:
+            raise ValueError(
+                f"Expected sequence length {height * width}, got {l}"
+            )
+
+        residual = x
+        x = self.norm(x)
+        x = self.down(x)
+        x = rearrange(x, "b (h w) c -> b c h w", h=height, w=width)
+        x = self.depthwise(x)
+        x = rearrange(x, "b c h w -> b (h w) c")
+        x = self.act(x)
+        x = self.dropout(x)
+        x = self.up(x)
+
+        return residual + self.scale * x
+
+
+class MonaAdapterMulti(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        hidden_dim=64,
+        kernel_sizes=None,
+        fusion="weighted_sum",
+        use_pointwise=True,
+        use_inner_residual=True,
+        dropout=0.1,
+    ):
+        super().__init__()
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive for MonaAdapterMulti")
+
+        if kernel_sizes is None:
+            kernel_sizes = [3, 5, 7]
+        if len(kernel_sizes) == 0:
+            raise ValueError("kernel_sizes must not be empty for MonaAdapterMulti")
+        if any(kernel_size % 2 == 0 for kernel_size in kernel_sizes):
+            raise ValueError("All kernel sizes must be odd for MonaAdapterMulti")
+        if fusion not in ("sum", "weighted_sum"):
+            raise ValueError(f"Unsupported fusion type: {fusion}")
+
+        self.fusion = fusion
+        self.use_inner_residual = use_inner_residual
+
+        self.norm = nn.LayerNorm(d_model)
+        self.down = nn.Linear(d_model, hidden_dim)
+        self.depthwise_branches = nn.ModuleList(
+            [
+                nn.Conv2d(
+                    hidden_dim,
+                    hidden_dim,
+                    kernel_size=kernel_size,
+                    padding=kernel_size // 2,
+                    groups=hidden_dim,
+                )
+                for kernel_size in kernel_sizes
+            ]
+        )
+        if fusion == "weighted_sum":
+            self.branch_logits = nn.Parameter(torch.zeros(len(kernel_sizes)))
+        else:
+            self.register_parameter("branch_logits", None)
+        self.pointwise = (
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1)
+            if use_pointwise
+            else None
+        )
+        self.act = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
+        self.up = nn.Linear(hidden_dim, d_model)
+        # Start close to the frozen backbone and let the adapter grow if useful.
+        self.scale = nn.Parameter(torch.tensor(1e-3))
+
+    def _fuse_branches(self, branch_outputs):
+        if len(branch_outputs) == 1:
+            return branch_outputs[0]
+
+        if self.fusion == "sum":
+            return torch.stack(branch_outputs, dim=0).sum(dim=0)
+
+        weights = torch.softmax(self.branch_logits, dim=0)
+        fused = 0
+        for weight, branch_output in zip(weights, branch_outputs):
+            fused = fused + weight * branch_output
+        return fused
+
+    def forward(self, x, height=None, width=None):
+        if height is None or width is None:
+            raise ValueError("MonaAdapterMulti requires spatial height and width")
+
+        b, l, _ = x.shape
+        if l != height * width:
+            raise ValueError(
+                f"Expected sequence length {height * width}, got {l}"
+            )
+
+        residual = x
+        x = self.norm(x)
+        x = self.down(x)
+        x = rearrange(x, "b (h w) c -> b c h w", h=height, w=width)
+
+        hidden_residual = x
+        branch_outputs = [branch(x) for branch in self.depthwise_branches]
+        x = self._fuse_branches(branch_outputs)
+        if self.pointwise is not None:
+            x = self.pointwise(x)
+        if self.use_inner_residual:
+            x = hidden_residual + x
+
+        x = rearrange(x, "b c h w -> b (h w) c")
+        x = self.act(x)
+        x = self.dropout(x)
+        x = self.up(x)
+
+        return residual + self.scale * x
 
 
 class TransformerLayer(nn.Module):
@@ -427,11 +618,22 @@ class TransformerBlock(nn.Module):
         with_shift=False,
         add_per_view_attn=False,
         no_cross_attn=False,
+        adapter_type="none",
+        adapter_hidden_dim=None,
+        adapter_cross_hidden_dim=None,
+        adapter_kernel_size=3,
+        adapter_kernel_sizes=None,
+        adapter_fusion="weighted_sum",
+        adapter_use_pointwise=False,
+        adapter_use_inner_residual=False,
+        adapter_dropout=0.1,
         **kwargs,
     ):
         super(TransformerBlock, self).__init__()
 
         self.no_cross_attn = no_cross_attn
+        self.self_attn_adapter = None
+        self.cross_attn_adapter = None
 
         if no_cross_attn:
             self.self_attn = TransformerLayer(
@@ -461,6 +663,47 @@ class TransformerBlock(nn.Module):
                 add_per_view_attn=add_per_view_attn,
             )
 
+        if adapter_type == "mona_lite":
+            hidden_dim = adapter_hidden_dim or d_model
+            cross_hidden_dim = adapter_cross_hidden_dim or hidden_dim
+            self.self_attn_adapter = MonaAdapterLite(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                kernel_size=adapter_kernel_size,
+                dropout=adapter_dropout,
+            )
+            if not no_cross_attn:
+                self.cross_attn_adapter = MonaAdapterLite(
+                    d_model=d_model,
+                    hidden_dim=cross_hidden_dim,
+                    kernel_size=adapter_kernel_size,
+                    dropout=adapter_dropout,
+                )
+        elif adapter_type == "mona_multi":
+            hidden_dim = adapter_hidden_dim or d_model
+            cross_hidden_dim = adapter_cross_hidden_dim or hidden_dim
+            self.self_attn_adapter = MonaAdapterMulti(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                kernel_sizes=adapter_kernel_sizes,
+                fusion=adapter_fusion,
+                use_pointwise=adapter_use_pointwise,
+                use_inner_residual=adapter_use_inner_residual,
+                dropout=adapter_dropout,
+            )
+            if not no_cross_attn:
+                self.cross_attn_adapter = MonaAdapterMulti(
+                    d_model=d_model,
+                    hidden_dim=cross_hidden_dim,
+                    kernel_sizes=adapter_kernel_sizes,
+                    fusion=adapter_fusion,
+                    use_pointwise=adapter_use_pointwise,
+                    use_inner_residual=adapter_use_inner_residual,
+                    dropout=adapter_dropout,
+                )
+        elif adapter_type != "none":
+            raise ValueError(f"Unsupported adapter_type: {adapter_type}")
+
     def forward(
         self,
         source,
@@ -470,7 +713,7 @@ class TransformerBlock(nn.Module):
         shifted_window_attn_mask=None,
         attn_num_splits=None,
         **kwargs,
-    ):
+        ):
         # source, target: [B, L, C]
 
         # self attention
@@ -483,6 +726,8 @@ class TransformerBlock(nn.Module):
             attn_num_splits=attn_num_splits,
             **kwargs,
         )
+        if self.self_attn_adapter is not None:
+            source = self.self_attn_adapter(source, height=height, width=width)
 
         if self.no_cross_attn:
             return source
@@ -497,6 +742,8 @@ class TransformerBlock(nn.Module):
             attn_num_splits=attn_num_splits,
             **kwargs,
         )
+        if self.cross_attn_adapter is not None:
+            source = self.cross_attn_adapter(source, height=height, width=width)
 
         return source
 
@@ -534,6 +781,15 @@ class MultiViewFeatureTransformer(nn.Module):
         ffn_dim_expansion=4,
         add_per_view_attn=False,
         no_cross_attn=False,
+        adapter_type="none",
+        adapter_hidden_dim=None,
+        adapter_cross_hidden_dim=None,
+        adapter_kernel_size=3,
+        adapter_kernel_sizes=None,
+        adapter_fusion="weighted_sum",
+        adapter_use_pointwise=False,
+        adapter_use_inner_residual=False,
+        adapter_dropout=0.1,
         **kwargs,
     ):
         super(MultiViewFeatureTransformer, self).__init__()
@@ -555,6 +811,15 @@ class MultiViewFeatureTransformer(nn.Module):
                     ),
                     add_per_view_attn=add_per_view_attn,
                     no_cross_attn=no_cross_attn,
+                    adapter_type=adapter_type,
+                    adapter_hidden_dim=adapter_hidden_dim,
+                    adapter_cross_hidden_dim=adapter_cross_hidden_dim,
+                    adapter_kernel_size=adapter_kernel_size,
+                    adapter_kernel_sizes=adapter_kernel_sizes,
+                    adapter_fusion=adapter_fusion,
+                    adapter_use_pointwise=adapter_use_pointwise,
+                    adapter_use_inner_residual=adapter_use_inner_residual,
+                    adapter_dropout=adapter_dropout,
                 )
                 for i in range(num_layers)
             ]

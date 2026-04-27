@@ -2,8 +2,7 @@ import torch
 from einops import rearrange
 
 from .multiview_transformer import MultiViewFeatureTransformer
-from .unimatch.utils import split_feature, merge_splits
-from .unimatch.position import PositionEmbeddingSine
+from .unimatch.position import PositionEmbeddingSine, SphericalPositionEmbedding
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -76,25 +75,28 @@ class Conv2d(nn.Module):
             init_bn(self.bn)
 
 
-def feature_add_position_list(features_list, attn_splits, feature_channels):
-    pos_enc = PositionEmbeddingSine(num_pos_feats=feature_channels // 2)
+class ResidualFeatureAdapter(nn.Module):
+    def __init__(self, channels, hidden_channels=None):
+        super().__init__()
+        if hidden_channels is None:
+            hidden_channels = channels
 
-    if attn_splits > 1:  # add position in splited window
-        features_splits = [
-            split_feature(x, num_splits=attn_splits) for x in features_list
-        ]
+        self.adapter = nn.Sequential(
+            nn.Conv2d(channels, hidden_channels, kernel_size=1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, channels, kernel_size=1, bias=False),
+        )
 
-        position = pos_enc(features_splits[0])
-        features_splits = [x + position for x in features_splits]
+    def forward(self, x):
+        return x + self.adapter(x)
 
-        out_features_list = [
-            merge_splits(x, num_splits=attn_splits) for x in features_splits
-        ]
 
-    else:
-        position = pos_enc(features_list[0])
+def feature_add_position_list(features_list, position_embedding, feature_adapter=None):
+    position = position_embedding(features_list[0])
+    out_features_list = [x + position for x in features_list]
 
-        out_features_list = [x + position for x in features_list]
+    if feature_adapter is not None:
+        out_features_list = [feature_adapter(x) for x in out_features_list]
 
     return out_features_list
 
@@ -109,6 +111,19 @@ class BackboneCascaded(torch.nn.Module):
         ffn_dim_expansion=4,
         no_cross_attn=False,
         num_head=1,
+        position_embedding_type="sine",
+        position_embedding_hidden_dim=None,
+        use_feature_adapter=False,
+        feature_adapter_hidden_dim=None,
+        transformer_adapter_type="none",
+        transformer_adapter_hidden_dim=None,
+        transformer_adapter_cross_hidden_dim=None,
+        transformer_adapter_kernel_size=3,
+        transformer_adapter_kernel_sizes=None,
+        transformer_adapter_fusion="weighted_sum",
+        transformer_adapter_use_pointwise=False,
+        transformer_adapter_use_inner_residual=False,
+        transformer_adapter_dropout=0.1,
     ):
         super(BackboneCascaded, self).__init__()
         self.feature_channels = feature_channels
@@ -125,6 +140,38 @@ class BackboneCascaded(torch.nn.Module):
             nhead=num_head,
             ffn_dim_expansion=ffn_dim_expansion,
             no_cross_attn=no_cross_attn,
+            adapter_type=transformer_adapter_type,
+            adapter_hidden_dim=transformer_adapter_hidden_dim,
+            adapter_cross_hidden_dim=transformer_adapter_cross_hidden_dim,
+            adapter_kernel_size=transformer_adapter_kernel_size,
+            adapter_kernel_sizes=transformer_adapter_kernel_sizes,
+            adapter_fusion=transformer_adapter_fusion,
+            adapter_use_pointwise=transformer_adapter_use_pointwise,
+            adapter_use_inner_residual=transformer_adapter_use_inner_residual,
+            adapter_dropout=transformer_adapter_dropout,
+        )
+
+        if position_embedding_type == "sine":
+            self.position_embedding = PositionEmbeddingSine(
+                num_pos_feats=feature_channels[0] // 2
+            )
+        elif position_embedding_type == "spherical":
+            self.position_embedding = SphericalPositionEmbedding(
+                embed_dim=feature_channels[0],
+                hidden_dim=position_embedding_hidden_dim,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported position embedding type: {position_embedding_type}"
+            )
+
+        self.feature_adapter = (
+            ResidualFeatureAdapter(
+                channels=feature_channels[0],
+                hidden_channels=feature_adapter_hidden_dim,
+            )
+            if use_feature_adapter
+            else None
         )
 
     def normalize_images(self, images):
@@ -186,7 +233,10 @@ class BackboneCascaded(torch.nn.Module):
 
         # add position to features
         cur_features_list = feature_add_position_list(
-            cur_features_list, attn_splits, self.feature_channels[0])
+            cur_features_list,
+            self.position_embedding,
+            self.feature_adapter,
+        )
 
         # Transformer
         cur_features_list = self.transformer(

@@ -66,9 +66,14 @@ def demo(cfg_dict: DictConfig):
 
     # Set up the output directory.
     if cfg_dict.output_dir is None:
-        output_dir = Path(
-            hydra.core.hydra_config.HydraConfig.get()["runtime"]["output_dir"]
+        repo_root = Path(__file__).resolve().parents[2]
+        mode_name = cfg.mode
+        weights_stem = (
+            Path(str(cfg.model.weights_path)).stem
+            if cfg.model.weights_path is not None
+            else "no_weights"
         )
+        output_dir = repo_root / "outputs" / f"demo_{cfg.dataset.name}_{mode_name}_{weights_stem}"
     else:  # for resuming
         output_dir = Path(cfg_dict.output_dir)
         os.makedirs(output_dir, exist_ok=True)
@@ -189,6 +194,13 @@ def predict(args, model_wrapper, cfg, output_dir, fps):
                 gaussians_prob, extrinsics, n, f, None, cpu=True, context_extrinsics=context_extrinsics
             )
             output_frames = output_prob['color'][0]
+            frame_dir = output_file.parent / f"{output_file.stem}_frames"
+            frame_dir.mkdir(exist_ok=True, parents=True)
+
+            for frame_idx, frame in enumerate(output_frames):
+                frame_image = (frame.clip(min=0, max=1) * 255).type(torch.uint8).cpu().numpy()
+                frame_image = rearrange(frame_image, "c h w -> h w c")
+                Image.fromarray(frame_image).save(frame_dir / f"{frame_idx:04d}.png")
 
             # save nearest gt frame
             gt_indices = torch.stack([t, 1 - t]).argmin(dim=0).cpu()

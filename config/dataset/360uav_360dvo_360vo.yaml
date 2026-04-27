@@ -1,0 +1,39 @@
+defaults:
+  - view_sampler: bounded
+
+name: mix
+roots: [/mnt/disk1/zwh/Dataset/mix]
+make_baseline_1: false
+augment: true
+
+image_shape: [512, 1024]
+background_color: [0.0, 0.0, 0.0]
+cameras_are_circular: false
+
+baseline_epsilon: 1e-3
+max_fov: 100.0
+
+skip_bad_shape: true
+near: .5
+far: 200.
+baseline_scale_bounds: false
+shuffle_val: false
+test_chunk_interval: 1
+train_times_per_scene: 200
+train_scenes:
+  - block_fix
+  - block_spiral
+  - drone_racetrack
+  - mountains
+  - 360vo_seq1
+  - 360vo_seq3
+  - 360vo_seq4
+  - 360vo_seq6
+val_scenes:
+  - 360vo_seq2
+  - 360vo_seq7
+test_scenes:
+  - 360vo_seq9
+include_nested_sequences: false
+
+cache_images: false

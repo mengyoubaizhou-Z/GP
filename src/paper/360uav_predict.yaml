@@ -1,0 +1,14 @@
+num_videos_per_scene: 1
+num_render_frames: 30
+wobble_radius: 0.5
+scenes:
+  block_fix:
+    - '000000_000010'
+  block_fix/sub:
+    - '000000_000010'
+  block_spiral:
+    - '000000_000010'
+  block_spiral/sub:
+    - '000000_000010'
+  block_spiral/sub-2:
+    - '000000_000010'

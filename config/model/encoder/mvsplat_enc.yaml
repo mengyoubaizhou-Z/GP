@@ -14,6 +14,11 @@ gaussian_adapter:
   gaussian_scale_min: 0.5
   gaussian_scale_max: 15.0
   sh_degree: 4
+  use_jacobian_aware_scale: true
+  use_jacobian_aware_basis: true
+  return_world_space_rotations: true
+  jacobian_scale_multiplier: 0.1
+  jacobian_scale_radial_factor: 0.5
 
 d_feature: 128
 
@@ -31,6 +36,7 @@ costvolume_unet_attn_res: [4]
 depth_unet_feat_dim: 32
 depth_unet_attn_res: [16]
 depth_unet_channel_mult: [1,1,1,1,1]
+use_spherical_cost_volume_warp: true
 downscale_factor: 4
 shim_patch_size: 4
 

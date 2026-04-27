@@ -14,6 +14,11 @@ pyimage:
     wo_fibo_gs: false
     wo_sh_res: false
     wo_feat: false
+    use_latlon_embedding: true
+    latlon_embedding_freqs: 2
+    use_latitude_aware_conv: true
+    latitude_aware_conv_freqs: 2
+    latitude_aware_dilations: [1, 2, 4]
     fibo_mlp_layers: 1
     gh_cnn_layers: 2
     patchs_height: 1
@@ -22,6 +27,11 @@ pyimage:
       gaussian_scale_min: 0.5
       gaussian_scale_max: 15.0
       sh_degree: 4
+      use_jacobian_aware_scale: true
+      use_jacobian_aware_basis: true
+      return_world_space_rotations: true
+      jacobian_scale_multiplier: 0.1
+      jacobian_scale_radial_factor: 0.5
     deferred_blend: true
   decoder:
     name: splatting_cuda

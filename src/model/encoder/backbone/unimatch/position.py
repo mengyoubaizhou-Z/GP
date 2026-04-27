@@ -44,3 +44,41 @@ class PositionEmbeddingSine(nn.Module):
         pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
         pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
         return pos
+
+
+class SphericalPositionEmbedding(nn.Module):
+    """Project ERP latitude/longitude codes to the feature dimension."""
+
+    def __init__(self, embed_dim, hidden_dim=None):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = embed_dim
+
+        self.projector = nn.Sequential(
+            nn.Conv2d(4, hidden_dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, embed_dim, kernel_size=1),
+        )
+
+    def forward(self, x):
+        b, _, h, w = x.size()
+
+        base_dtype = torch.float32
+        y = (torch.arange(h, device=x.device, dtype=base_dtype) + 0.5) / h
+        x_coord = (torch.arange(w, device=x.device, dtype=base_dtype) + 0.5) / w
+
+        latitude = (0.5 - y).unsqueeze(1) * math.pi
+        longitude = (x_coord * 2.0 - 1.0).unsqueeze(0) * math.pi
+
+        spherical_code = torch.stack(
+            [
+                longitude.expand(h, w).sin(),
+                longitude.expand(h, w).cos(),
+                latitude.expand(h, w).sin(),
+                latitude.expand(h, w).cos(),
+            ],
+            dim=0,
+        ).unsqueeze(0).expand(b, -1, -1, -1)
+
+        pos = self.projector(spherical_code)
+        return pos.to(dtype=x.dtype)

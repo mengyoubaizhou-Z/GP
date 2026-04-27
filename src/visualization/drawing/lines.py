@@ -7,13 +7,13 @@ from torch import Tensor
 
 from .coordinate_conversion import generate_conversions
 from .rendering import render_over_image
-from .types import Pair, Scalar, Vector, sanitize_scalar, sanitize_vector
+from .types import Pair, Scalar, Vector, Vector2, sanitize_scalar, sanitize_vector
 
 
 def draw_lines(
     image: Float[Tensor, "3 height width"],
-    start: Vector,
-    end: Vector,
+    start: Vector2,
+    end: Vector2,
     color: Vector,
     width: Scalar,
     cap: Literal["butt", "round", "square"] = "round",

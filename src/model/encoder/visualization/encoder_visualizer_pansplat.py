@@ -1,10 +1,8 @@
-from pathlib import Path
 from random import randrange
 from typing import Optional, List
 
 import numpy as np
 import torch
-import wandb
 from einops import rearrange, reduce, repeat
 from jaxtyping import Bool, Float
 from torch import Tensor
@@ -17,7 +15,6 @@ from ....visualization.colors import get_distinct_color
 from ....visualization.drawing.lines import draw_lines
 from ....visualization.drawing.points import draw_points
 from ....visualization.layout import add_border, hcat, vcat
-# from ...ply_export import export_ply
 from ..encoder_pansplat import EncoderPanSplat
 from .encoder_visualizer import EncoderVisualizer
 from .encoder_visualizer_cfg import EncoderVisualizerCostVolumeCfg
@@ -60,26 +57,9 @@ class EncoderVisualizerPanSplat(
             )
 
         visualization = {}
-        if "gaussians" in encoder_output:
-            result = encoder_output["gaussians"]["gaussians"]
-
-            # This is kind of hacky for now, since we're using it for short experiments.
-            if self.cfg.export_ply and wandb.run is not None:
-                name = wandb.run._name.split(" ")[0]
-                ply_path = Path(f"outputs/gaussians/{name}/{global_step:0>6}.ply")
-                export_ply(
-                    context["extrinsics"][0, 0],
-                    result.means[0],
-                    visualization_dump["scales"][0],
-                    visualization_dump["rotations"][0],
-                    result.harmonics[0],
-                    result.opacities[0],
-                    ply_path,
-                )
-
-            # visualization["gaussians"] = self.visualize_pyramid_gaussians(
-            #     encoder_output["gaussians"]
-            # )
+        # visualization["gaussians"] = self.visualize_pyramid_gaussians(
+        #     encoder_output["gaussians"]
+        # )
 
         if "mono_depth" in visualization_dump:
             visualization["mono_depth"] = self.visualize_single_depth(

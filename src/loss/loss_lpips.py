@@ -32,6 +32,8 @@ class LossLpips(Loss[LossLpipsCfg, LossLpipsCfgWrapper]):
 
         self.lpips = LPIPS(net="vgg")
         convert_to_buffer(self.lpips, persistent=False)
+        self.lpips.requires_grad_(False)
+        self.lpips.eval()
 
     def forward(
         self,

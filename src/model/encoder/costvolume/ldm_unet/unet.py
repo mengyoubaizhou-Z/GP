@@ -20,7 +20,45 @@ from .util import (
     timestep_embedding,
 )
 from .attention import SpatialTransformer
-from xformers.ops import memory_efficient_attention
+
+try:
+    from xformers.ops import memory_efficient_attention
+except ImportError:
+    memory_efficient_attention = None
+
+
+def memory_efficient_attention_compat(q, k, v, attn_mask=None):
+    q = q.to(torch.bfloat16).contiguous()
+    k = k.to(torch.bfloat16).contiguous()
+    v = v.to(torch.bfloat16).contiguous()
+    if attn_mask is not None:
+        attn_mask = attn_mask.to(torch.bfloat16).contiguous()
+
+    if memory_efficient_attention is not None:
+        try:
+            return memory_efficient_attention(q, k, v, attn_mask)
+        except NotImplementedError:
+            pass
+
+    q = q.unsqueeze(1)
+    k = k.unsqueeze(1)
+    v = v.unsqueeze(1)
+    if attn_mask is not None:
+        attn_mask = attn_mask.unsqueeze(1)
+
+    with torch.backends.cuda.sdp_kernel(
+        enable_flash=False,
+        enable_mem_efficient=False,
+        enable_math=True,
+    ):
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+        )
+    return out.squeeze(1)
 
 
 # dummy replace
@@ -552,10 +590,10 @@ class QKVAttentionLegacy(nn.Module):
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
-        a = memory_efficient_attention(
-            q.permute(0, 2, 1).to(torch.bfloat16).contiguous(),
-            k.permute(0, 2, 1).to(torch.bfloat16).contiguous(),
-            v.permute(0, 2, 1).to(torch.bfloat16).contiguous(),
+        a = memory_efficient_attention_compat(
+            q.permute(0, 2, 1),
+            k.permute(0, 2, 1),
+            v.permute(0, 2, 1),
         ).permute(0, 2, 1).reshape(bs, -1, length).type_as(qkv)
 
         # move view dim back to batch dim in original '(v b)' order if needed

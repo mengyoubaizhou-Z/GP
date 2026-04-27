@@ -6,6 +6,7 @@ import numpy as np
 
 from ..backbone.unimatch.geometry import points_grid
 from .ldm_unet.unet import UNetModel
+from .spherical_sampling import sample_erp_features_spherically
 from torch import Tensor
 from jaxtyping import Float
 from src.global_cfg import get_cfg
@@ -17,6 +18,7 @@ def warp_with_pose_depth_candidates(
     depth,
     clamp_min_depth=1e-3,
     warp_padding_mode="zeros",
+    use_spherical_cost_volume_warp=True,
 ):
     """
     feature1: [B, C, H, W]
@@ -29,7 +31,6 @@ def warp_with_pose_depth_candidates(
     assert depth.dim() == 4
 
     b, d, h, w = depth.size()
-    c = feature1.size(1)
 
     with torch.no_grad():
         # pixel coordinates
@@ -49,26 +50,31 @@ def warp_with_pose_depth_candidates(
             min=clamp_min_depth
         )  # normalize
         phi = torch.atan2(points[:, 0], points[:, 2])
-        theta = torch.asin(points[:, 1])
+        theta = torch.asin(points[:, 1].clamp(-1.0, 1.0))
+
+    if use_spherical_cost_volume_warp:
+        # Sample ERP features on the sphere so the seam wraps around and polar
+        # neighborhoods are weighted by angular distance rather than 2D proximity.
+        warped_feature = sample_erp_features_spherically(
+            feature1,
+            points,
+            output_shape=(h, w),
+        )
+    else:
         u = (phi + np.pi) / (2 * np.pi)
         v = (theta + np.pi / 2) / np.pi
 
-        # normalize to [-1, 1]
         x_grid = 2 * u - 1
         y_grid = 2 * v - 1
+        grid = torch.stack([x_grid, y_grid], dim=-1)
 
-        grid = torch.stack([x_grid, y_grid], dim=-1)  # [B, D, H*W, 2]
-
-    # sample features
-    warped_feature = F.grid_sample(
-        feature1,
-        grid.view(b, d * h, w, 2),
-        mode="bilinear",
-        padding_mode=warp_padding_mode,
-        align_corners=True,
-    ).view(
-        b, c, d, h, w
-    )  # [B, C, D, H, W]
+        warped_feature = F.grid_sample(
+            feature1,
+            grid.view(b, d * h, w, 2),
+            mode="bilinear",
+            padding_mode=warp_padding_mode,
+            align_corners=True,
+        ).view(b, feature1.size(1), d, h, w)
 
     return warped_feature
 
@@ -117,12 +123,14 @@ class DepthPredictorCascaded(nn.Module):
         costvolume_unet_attn_res=(),
         num_views=2,
         wo_gbp=True,
+        use_spherical_cost_volume_warp=True,
     ):
         super(DepthPredictorCascaded, self).__init__()
         self.num_depth_candidates_list = num_depth_candidates_list[:mvs_stages]
         self.costvolume_unet_feat_dims_list = costvolume_unet_feat_dims_list[:mvs_stages]
         self.mvs_stages = mvs_stages
         self.wo_gbp = wo_gbp
+        self.use_spherical_cost_volume_warp = use_spherical_cost_volume_warp
 
         # Cost volume refinement: 2D U-Net
         self.corr_refine_nets = nn.ModuleList()
@@ -226,6 +234,7 @@ class DepthPredictorCascaded(nn.Module):
                     pose_curr,
                     1.0 / disp_candi_curr,
                     warp_padding_mode="zeros",
+                    use_spherical_cost_volume_warp=self.use_spherical_cost_volume_warp,
                 )  # [vB, C, D, H, W]
                 # calculate similarity
                 raw_correlation_in = (feat01.unsqueeze(2) * feat01_warped).sum(

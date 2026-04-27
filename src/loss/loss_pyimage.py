@@ -11,11 +11,16 @@ from src.model.decoder import DecoderCfg
 from src.dataset.data_module import DatasetCfg
 from src.model.encoder.gaussian_head import GaussianHead
 from jaxtyping import install_import_hook
-with install_import_hook(
-    ("src",),
-    ("beartype", "beartype"),
-):
+import os
+
+if os.getenv("PANSPLAT_DISABLE_RUNTIME_TYPECHECK", "0") == "1":
     from src.model.decoder import get_decoder
+else:
+    with install_import_hook(
+        ("src",),
+        ("beartype", "beartype"),
+    ):
+        from src.model.decoder import get_decoder
 from src.global_cfg import get_cfg
 
 
@@ -82,5 +87,7 @@ class LossPyimage(Loss[LossPyimageCfg, LossPyimageCfgWrapper]):
             batch["target"]["far"],
             context_extrinsics=batch["context"]["extrinsics"],
         )
+        if isinstance(output_stages, dict):
+            output_stages = [output_stages]
 
         return output_stages

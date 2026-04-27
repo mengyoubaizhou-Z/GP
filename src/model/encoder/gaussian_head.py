@@ -14,6 +14,81 @@ from src.global_cfg import get_cfg
 from dataclasses import fields
 
 
+class LatitudeDilatedConv2d(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        latitude_channels: int,
+        horizontal_dilations: list[int],
+    ) -> None:
+        super().__init__()
+        self.branches = nn.ModuleList(
+            [
+                nn.Conv2d(
+                    in_channels + latitude_channels,
+                    out_channels,
+                    3,
+                    1,
+                    padding=(1, dilation),
+                    dilation=(1, dilation),
+                )
+                for dilation in horizontal_dilations
+            ]
+        )
+        self.gate = nn.Conv2d(latitude_channels, len(horizontal_dilations), 1)
+
+    def forward(self, x: Tensor, latitude_features: Tensor) -> Tensor:
+        x = torch.cat([x, latitude_features], dim=1)
+        branch_outputs = torch.stack([branch(x) for branch in self.branches], dim=1)
+        gate = F.softmax(self.gate(latitude_features), dim=1)
+        return (branch_outputs * gate.unsqueeze(2)).sum(dim=1)
+
+
+class LatitudeAwareConvNet(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        out_channels: int,
+        num_layers: int,
+        latitude_channels: int,
+        horizontal_dilations: list[int],
+    ) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList()
+        self.activations = nn.ModuleList()
+
+        current_in = in_channels
+        for _ in range(num_layers - 1):
+            self.layers.append(
+                LatitudeDilatedConv2d(
+                    current_in,
+                    hidden_channels,
+                    latitude_channels,
+                    horizontal_dilations,
+                )
+            )
+            self.activations.append(nn.GELU())
+            current_in = hidden_channels
+
+        self.layers.append(
+            LatitudeDilatedConv2d(
+                current_in,
+                out_channels,
+                latitude_channels,
+                horizontal_dilations,
+            )
+        )
+
+    def forward(self, x: Tensor, latitude_features: Tensor) -> Tensor:
+        for layer_idx, layer in enumerate(self.layers):
+            x = layer(x, latitude_features)
+            if layer_idx < len(self.activations):
+                x = self.activations[layer_idx](x)
+        return x
+
+
 class GaussianHead(nn.Module):
 
     def __init__(
@@ -37,6 +112,11 @@ class GaussianHead(nn.Module):
         patchs_width,
         encoder_cfg,
         deferred_blend,
+        use_latlon_embedding=False,
+        latlon_embedding_freqs=2,
+        use_latitude_aware_conv=False,
+        latitude_aware_conv_freqs=2,
+        latitude_aware_dilations=(1, 2, 4),
     ):
         super().__init__()
         # Configs from the encoder
@@ -71,8 +151,17 @@ class GaussianHead(nn.Module):
         self.wo_feat = wo_feat
         self.num_patchs = patchs_height * patchs_width
         assert self.num_patchs > 0, "num_patchs should be greater than 0"
-        self.padding = gh_cnn_layers
+        self.use_latitude_aware_conv = use_latitude_aware_conv
+        self.latitude_aware_conv_freqs = latitude_aware_conv_freqs
+        self.latitude_aware_conv_dim = 2 * latitude_aware_conv_freqs if use_latitude_aware_conv else 0
+        self.latitude_aware_dilations = list(latitude_aware_dilations)
+        assert len(self.latitude_aware_dilations) > 0, "latitude_aware_dilations must not be empty"
+        assert all(d >= 1 for d in self.latitude_aware_dilations), "latitude_aware_dilations must be >= 1"
+        self.padding = gh_cnn_layers * max(self.latitude_aware_dilations) if self.use_latitude_aware_conv else gh_cnn_layers
         self.deferred_blend = deferred_blend
+        self.use_latlon_embedding = use_latlon_embedding
+        self.latlon_embedding_freqs = latlon_embedding_freqs
+        self.latlon_embedding_dim = 4 * latlon_embedding_freqs if use_latlon_embedding else 0
 
         self.to_gaussians_list = nn.ModuleList()
         if not wo_fibo_gs:
@@ -86,6 +175,21 @@ class GaussianHead(nn.Module):
             stage_height = last_stage_height if unify_gh_res else last_stage_height // scale
             self.full_shape.append((stage_height, stage_height * 2))
 
+            if self.use_latlon_embedding:
+                latlon_map = self.build_latlon_feature_map(self.full_shape[-1])
+                self.register_buffer(
+                    f"latlon_map_{stage_idx}",
+                    latlon_map,
+                    persistent=False,
+                )
+            if self.use_latitude_aware_conv:
+                latitude_map = self.build_latitude_feature_map(self.full_shape[-1])
+                self.register_buffer(
+                    f"latitude_map_{stage_idx}",
+                    latitude_map,
+                    persistent=False,
+                )
+
             # Gaussians xy and patch range
             patch_info = self.stage_patch_info(stage_idx, patchs_height, patchs_width)
             for patch_idx, (gs_xy_patch, range_xy_patch, range_hw_patch) in enumerate(zip(*patch_info)):
@@ -95,7 +199,7 @@ class GaussianHead(nn.Module):
                 self.register_buffer(f"range_xy_{key}", range_xy_patch, persistent=False)
 
             # Gaussians prediction: covariance, color
-            gau_in = 3 + num_depth_candidates
+            gau_in = 3 + num_depth_candidates + self.latlon_embedding_dim
             if not wo_feat:
                 gau_in += feature_channels
             gau_out = self.gaussian_raw_channels
@@ -156,6 +260,16 @@ class GaussianHead(nn.Module):
         return gs_xy, range_xy, range_hw
 
     def gaussians_cnn(self, in_channels, hidden_channels, out_channels, num_layers):
+        if self.use_latitude_aware_conv:
+            return LatitudeAwareConvNet(
+                in_channels,
+                hidden_channels,
+                out_channels,
+                num_layers,
+                self.latitude_aware_conv_dim,
+                self.latitude_aware_dilations,
+            )
+
         layers = []
         for _ in range(num_layers - 1):
             layers.append(nn.Conv2d(in_channels, hidden_channels, 3, 1, 1))
@@ -172,6 +286,37 @@ class GaussianHead(nn.Module):
             in_channels = hidden_channels
         layers.append(nn.Linear(in_channels, out_channels))
         return nn.Sequential(*layers)
+
+    def build_latlon_embedding(self, xy: Tensor) -> Tensor:
+        lon = xy[..., 0] * np.pi
+        lat = xy[..., 1] * (np.pi / 2)
+
+        emb = []
+        for freq in range(1, self.latlon_embedding_freqs + 1):
+            emb.extend([
+                torch.sin(freq * lon),
+                torch.cos(freq * lon),
+                torch.sin(freq * lat),
+                torch.cos(freq * lat),
+            ])
+        return torch.stack(emb, dim=0)
+
+    def build_latlon_feature_map(self, image_shape: tuple[int, int]) -> Tensor:
+        xy, _ = sample_image_grid(image_shape)
+        xy = xy * 2 - 1
+        return self.build_latlon_embedding(xy).float()
+
+    def build_latitude_feature_map(self, image_shape: tuple[int, int]) -> Tensor:
+        xy, _ = sample_image_grid(image_shape)
+        lat = (xy[..., 1] * 2 - 1) * (np.pi / 2)
+
+        emb = []
+        for freq in range(1, self.latitude_aware_conv_freqs + 1):
+            emb.extend([
+                torch.sin(freq * lat),
+                torch.cos(freq * lat),
+            ])
+        return torch.stack(emb, dim=0).float()
 
     def forward(self, mvs_outputs, context, global_step=None, inference=False):
         b, v, c, _, _ = context['image'].shape
@@ -277,9 +422,19 @@ class GaussianHead(nn.Module):
 
             # gaussians head
             raw_gaussians_in = [images, raw_correlation]
+            if self.use_latlon_embedding:
+                latlon = getattr(self, f"latlon_map_{stage_idx}").unsqueeze(0)
+                latlon = self.crop_patch(latlon, stage_idx, patch_idx, "latlon")
+                latlon = repeat(latlon, "1 c h w -> vb c h w", vb=v * b)
+                raw_gaussians_in.append(latlon)
             if not self.wo_feat:
                 raw_gaussians_in.insert(1, features)
             raw_gaussians_in = torch.cat(raw_gaussians_in, dim=1)
+            latitude = None
+            if self.use_latitude_aware_conv:
+                latitude = getattr(self, f"latitude_map_{stage_idx}").unsqueeze(0)
+                latitude = self.crop_patch(latitude, stage_idx, patch_idx, "latitude")
+                latitude = repeat(latitude, "1 c h w -> vb c h w", vb=v * b)
 
             # add residual
             if stage_idx > 0 and not self.wo_pgs_res:
@@ -288,7 +443,13 @@ class GaussianHead(nn.Module):
                 last_raw_gaussians = unpad_pano(last_raw_gaussians, self.padding)
                 raw_gaussians_in = torch.cat([raw_gaussians_in, last_raw_gaussians], dim=1)
 
-            delta_raw_gaussians = self.to_gaussians_list[stage_idx](raw_gaussians_in)
+            if self.use_latitude_aware_conv:
+                delta_raw_gaussians = self.to_gaussians_list[stage_idx](
+                    raw_gaussians_in,
+                    latitude,
+                )
+            else:
+                delta_raw_gaussians = self.to_gaussians_list[stage_idx](raw_gaussians_in)
 
             # add residual
             if stage_idx == 0 or self.wo_pgs_res:

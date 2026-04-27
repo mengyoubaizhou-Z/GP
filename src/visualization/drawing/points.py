@@ -7,12 +7,12 @@ from torch import Tensor
 
 from .coordinate_conversion import generate_conversions
 from .rendering import render_over_image
-from .types import Pair, Scalar, Vector, sanitize_scalar, sanitize_vector
+from .types import Pair, Scalar, Vector, Vector2, sanitize_scalar, sanitize_vector
 
 
 def draw_points(
     image: Float[Tensor, "3 height width"],
-    points: Vector,
+    points: Vector2,
     color: Vector = [1, 1, 1],
     radius: Scalar = 1,
     inner_radius: Scalar = 0,

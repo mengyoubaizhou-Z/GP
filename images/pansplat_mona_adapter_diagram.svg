@@ -1,0 +1,134 @@
+<svg width="1280" height="820" viewBox="0 0 1280 820" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .title { font: 700 28px 'Arial', sans-serif; fill: #1f2937; }
+      .subtitle { font: 600 18px 'Arial', sans-serif; fill: #374151; }
+      .label { font: 600 14px 'Arial', sans-serif; fill: #111827; }
+      .small { font: 500 13px 'Arial', sans-serif; fill: #4b5563; }
+      .tiny { font: 500 12px 'Arial', sans-serif; fill: #6b7280; }
+      .chip { font: 600 15px 'Arial', sans-serif; fill: #111827; }
+      .panel-title { font: 700 22px 'Arial', sans-serif; fill: #111827; }
+      .footer { font: 600 18px 'Arial', sans-serif; fill: #111827; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#111827"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="820" fill="#ffffff"/>
+
+  <text x="72" y="62" class="title">PanSplat Mona Adapter Overview</text>
+  <text x="72" y="92" class="small">Paper-style schematic for the current PanSplat mona_lite modification</text>
+
+  <rect x="72" y="124" rx="18" ry="18" width="250" height="44" fill="#fef3c7" stroke="#111827" stroke-width="2"/>
+  <text x="96" y="152" class="chip">Current PanSplat Route</text>
+
+  <rect x="340" y="124" rx="18" ry="18" width="470" height="44" fill="#f3f4f6" stroke="#111827" stroke-width="1.8"/>
+  <text x="365" y="152" class="chip">feature -&gt; SPE -&gt; Transformer Blocks x L</text>
+
+  <rect x="834" y="124" rx="18" ry="18" width="374" height="44" fill="#f9fafb" stroke="#9ca3af" stroke-width="1.6" stroke-dasharray="7 6"/>
+  <text x="858" y="152" class="small">Old shallow path: feature -&gt; SPE -&gt; feature_adapter -&gt; transformer</text>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="212" rx="32" ry="32" width="505" height="520" fill="#ffffff" stroke="#111827" stroke-width="4"/>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="690" y="212" rx="32" ry="32" width="505" height="520" fill="#ffffff" stroke="#111827" stroke-width="4"/>
+  </g>
+
+  <text x="187" y="760" class="footer">PanSplat Transformer Block</text>
+  <text x="873" y="760" class="footer">MonaAdapterLite</text>
+
+  <text x="128" y="254" class="panel-title">Block-level insertion in PanSplat</text>
+  <text x="738" y="254" class="panel-title">Single-branch Mona inside each adapter</text>
+
+  <rect x="190" y="612" rx="18" ry="18" width="286" height="48" fill="#fff7ed" stroke="#111827" stroke-width="2.2"/>
+  <text x="236" y="642" class="label">Input tokens + SPE</text>
+
+  <rect x="174" y="526" rx="18" ry="18" width="318" height="56" fill="#dff3e1" stroke="#111827" stroke-width="2.2"/>
+  <text x="250" y="560" class="label">Self-Attn Layer</text>
+
+  <rect x="194" y="434" rx="18" ry="18" width="278" height="56" fill="#fcae91" stroke="#111827" stroke-width="2.2"/>
+  <text x="247" y="468" class="label">Mona Adapter Lite</text>
+
+  <rect x="156" y="332" rx="18" ry="18" width="355" height="66" fill="#dff3e1" stroke="#111827" stroke-width="2.2"/>
+  <text x="214" y="360" class="label">Cross-Attn + FFN Layer</text>
+  <text x="202" y="382" class="tiny">source attends to target, then feed-forward update</text>
+
+  <rect x="194" y="238" rx="18" ry="18" width="278" height="56" fill="#fcae91" stroke="#111827" stroke-width="2.2"/>
+  <text x="247" y="272" class="label">Mona Adapter Lite</text>
+
+  <line x1="333" y1="612" x2="333" y2="588" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="333" y1="526" x2="333" y2="492" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="333" y1="434" x2="333" y2="400" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="333" y1="332" x2="333" y2="296" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="333" y1="238" x2="333" y2="220" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="360" y="283" width="175" height="26" rx="13" ry="13" fill="#f3f4f6"/>
+  <text x="378" y="301" class="tiny">cross_attn_adapter(source)</text>
+
+  <rect x="360" y="480" width="161" height="26" rx="13" ry="13" fill="#f3f4f6"/>
+  <text x="381" y="498" class="tiny">self_attn_adapter(source)</text>
+
+  <circle cx="522" cy="560" r="13" fill="#ffffff" stroke="#111827" stroke-width="2.2"/>
+  <text x="517" y="565" class="label">+</text>
+  <circle cx="522" cy="365" r="13" fill="#ffffff" stroke="#111827" stroke-width="2.2"/>
+  <text x="517" y="370" class="label">+</text>
+
+  <path d="M522 574 C562 574, 566 520, 566 462 L566 274 C566 244, 548 238, 522 238" fill="none" stroke="#111827" stroke-width="2.6"/>
+  <path d="M522 379 C552 379, 556 350, 556 266" fill="none" stroke="#111827" stroke-width="2.6"/>
+
+  <text x="120" y="700" class="small">Each TransformerBlock now inserts two mona_lite adapters:</text>
+  <text x="120" y="722" class="small">1) after self_attn, 2) after cross_attn_ffn. The old shallow feature_adapter stays outside the block.</text>
+
+  <rect x="824" y="618" rx="18" ry="18" width="238" height="48" fill="#fcae91" stroke="#111827" stroke-width="2.2"/>
+  <text x="887" y="648" class="label">LayerNorm</text>
+
+  <circle cx="943" cy="590" r="13" fill="#ffffff" stroke="#111827" stroke-width="2.2"/>
+  <text x="938" y="595" class="label">+</text>
+
+  <rect x="804" y="520" rx="18" ry="18" width="278" height="50" fill="#bfe5ef" stroke="#111827" stroke-width="2.2"/>
+  <text x="863" y="551" class="label">Down Projection</text>
+
+  <rect x="839" y="416" rx="18" ry="18" width="208" height="70" fill="#f7cadc" stroke="#111827" stroke-width="2.2"/>
+  <text x="895" y="447" class="label">3x3 DW Conv</text>
+  <text x="859" y="470" class="tiny">single spatial branch in PanSplat mona_lite</text>
+
+  <circle cx="943" cy="384" r="13" fill="#ffffff" stroke="#111827" stroke-width="2.2"/>
+  <text x="938" y="389" class="label">+</text>
+
+  <rect x="876" y="336" rx="18" ry="18" width="134" height="38" fill="#f6f0da" stroke="#111827" stroke-width="2.2"/>
+  <text x="918" y="360" class="label">GELU</text>
+
+  <rect x="866" y="278" rx="18" ry="18" width="154" height="38" fill="#f3f4f6" stroke="#111827" stroke-width="2.2"/>
+  <text x="901" y="302" class="label">Dropout</text>
+
+  <rect x="804" y="202" rx="18" ry="18" width="278" height="50" fill="#bfe5ef" stroke="#111827" stroke-width="2.2"/>
+  <text x="879" y="233" class="label">Up Projection</text>
+
+  <line x1="943" y1="618" x2="943" y2="603" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="943" y1="577" x2="943" y2="570" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="943" y1="520" x2="943" y2="486" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="943" y1="416" x2="943" y2="397" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="943" y1="371" x2="943" y2="316" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="943" y1="278" x2="943" y2="252" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="943" y1="202" x2="943" y2="182" stroke="#111827" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <path d="M943 642 C1084 642, 1105 604, 1105 530 L1105 254 C1105 220, 1078 202, 1040 202" fill="none" stroke="#111827" stroke-width="2.6"/>
+  <line x1="1105" y1="202" x2="1055" y2="202" stroke="#111827" stroke-width="2.6" marker-end="url(#arrow)"/>
+
+  <circle cx="1090" cy="202" r="13" fill="#ffffff" stroke="#111827" stroke-width="2.2"/>
+  <text x="1084" y="207" class="label">+</text>
+
+  <rect x="1038" y="580" width="94" height="26" rx="13" ry="13" fill="#f3f4f6"/>
+  <text x="1062" y="598" class="tiny">x alpha</text>
+
+  <text x="748" y="701" class="small">Implemented at [multiview_transformer.py]:</text>
+  <text x="748" y="723" class="small">LayerNorm -&gt; Linear down -&gt; 3x3 depthwise conv -&gt; GELU -&gt; Dropout -&gt; Linear up -&gt; residual.</text>
+
+  <rect x="72" y="780" rx="15" ry="15" width="1136" height="24" fill="#f9fafb"/>
+  <text x="274" y="797" class="tiny">Code mapping: backbone_cascaded.py = feature + SPE + optional shallow feature_adapter | multiview_transformer.py = TransformerBlock + MonaAdapterLite</text>
+</svg>

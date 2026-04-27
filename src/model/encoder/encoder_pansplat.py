@@ -4,6 +4,7 @@ from typing import Literal, Optional, List
 import torch
 from einops import rearrange
 from collections import OrderedDict
+from collections import defaultdict
 
 from .backbone import (
     BackboneCascaded,
@@ -48,8 +49,24 @@ class EncoderPanSplatCfg:
     unifuse_pretrained_path: str
     habitat_monodepth_path: str
     use_wrap_padding: bool
+    use_spherical_cost_volume_warp: bool
     fpn_max_height: int
     freeze_mvs: bool
+    freeze_backbone: bool = False
+    backbone_position_embedding_type: str = "sine"
+    backbone_position_embedding_hidden_dim: int | None = None
+    backbone_use_feature_adapter: bool = False
+    backbone_feature_adapter_hidden_dim: int | None = None
+    backbone_transformer_adapter_type: str = "none"
+    backbone_transformer_adapter_hidden_dim: int | None = None
+    backbone_transformer_adapter_cross_hidden_dim: int | None = None
+    backbone_transformer_adapter_kernel_size: int = 3
+    backbone_transformer_adapter_kernel_sizes: List[int] | None = None
+    backbone_transformer_adapter_fusion: str = "weighted_sum"
+    backbone_transformer_adapter_use_pointwise: bool = False
+    backbone_transformer_adapter_use_inner_residual: bool = False
+    backbone_transformer_adapter_dropout: float = 0.1
+    backbone_trainable_modules: List[str] | None = None
 
 
 class EncoderPanSplat(Encoder[EncoderPanSplatCfg]):
@@ -63,6 +80,19 @@ class EncoderPanSplat(Encoder[EncoderPanSplatCfg]):
         self.backbone = BackboneCascaded(
             feature_channels=cfg.d_feature[:cfg.fpn_stages],
             no_cross_attn=cfg.wo_backbone_cross_attn,
+            position_embedding_type=cfg.backbone_position_embedding_type,
+            position_embedding_hidden_dim=cfg.backbone_position_embedding_hidden_dim,
+            use_feature_adapter=cfg.backbone_use_feature_adapter,
+            feature_adapter_hidden_dim=cfg.backbone_feature_adapter_hidden_dim,
+            transformer_adapter_type=cfg.backbone_transformer_adapter_type,
+            transformer_adapter_hidden_dim=cfg.backbone_transformer_adapter_hidden_dim,
+            transformer_adapter_cross_hidden_dim=cfg.backbone_transformer_adapter_cross_hidden_dim,
+            transformer_adapter_kernel_size=cfg.backbone_transformer_adapter_kernel_size,
+            transformer_adapter_kernel_sizes=cfg.backbone_transformer_adapter_kernel_sizes,
+            transformer_adapter_fusion=cfg.backbone_transformer_adapter_fusion,
+            transformer_adapter_use_pointwise=cfg.backbone_transformer_adapter_use_pointwise,
+            transformer_adapter_use_inner_residual=cfg.backbone_transformer_adapter_use_inner_residual,
+            transformer_adapter_dropout=cfg.backbone_transformer_adapter_dropout,
         )
         self.backbone = erp_convert(self.backbone)
         if get_cfg().mode == 'train':
@@ -142,6 +172,7 @@ class EncoderPanSplat(Encoder[EncoderPanSplatCfg]):
             costvolume_unet_attn_res=tuple(cfg.costvolume_unet_attn_res),
             num_views=get_cfg().dataset.view_sampler.num_context_views,
             wo_gbp=cfg.wo_gbp,
+            use_spherical_cost_volume_warp=cfg.use_spherical_cost_volume_warp,
         )
         if cfg.use_wrap_padding:
             self.depth_predictor = erp_convert(self.depth_predictor)
@@ -163,6 +194,65 @@ class EncoderPanSplat(Encoder[EncoderPanSplatCfg]):
                 param.requires_grad = False
             for param in self.backbone.parameters():
                 param.requires_grad = False
+        elif cfg.freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
+            trainable_prefixes = ["position_embedding", "feature_adapter"]
+            trainable_name_segments = []
+            if cfg.backbone_transformer_adapter_type != "none":
+                trainable_name_segments.extend(
+                    ["self_attn_adapter", "cross_attn_adapter"]
+                )
+            if cfg.backbone_trainable_modules is not None:
+                trainable_prefixes.extend(cfg.backbone_trainable_modules)
+
+            for name, param in self.backbone.named_parameters():
+                name_segments = name.split(".")
+                if any(
+                    name == prefix or name.startswith(f"{prefix}.")
+                    for prefix in trainable_prefixes
+                ) or any(segment in name_segments for segment in trainable_name_segments):
+                    param.requires_grad = True
+
+        if get_cfg().mode == "train":
+            self._log_trainable_parameters()
+
+    def _log_trainable_parameters(self) -> None:
+        total_params = 0
+        trainable_params = 0
+        trainable_param_names = []
+        trainable_groups = defaultdict(int)
+
+        for name, param in self.named_parameters():
+            numel = param.numel()
+            total_params += numel
+            if not param.requires_grad:
+                continue
+
+            trainable_params += numel
+            trainable_param_names.append(name)
+
+            group_name = name.split(".")[0]
+            if group_name == "backbone" and len(name.split(".")) > 1:
+                group_name = ".".join(name.split(".")[:2])
+            trainable_groups[group_name] += numel
+
+        print(
+            "==> Trainable params: "
+            f"{trainable_params:,} / {total_params:,} "
+            f"({100.0 * trainable_params / max(total_params, 1):.2f}%)"
+        )
+
+        print("==> Trainable parameter groups:")
+        for group_name, numel in sorted(
+            trainable_groups.items(), key=lambda item: (-item[1], item[0])
+        ):
+            print(f"    - {group_name}: {numel:,}")
+
+        print("==> Trainable parameter names:")
+        for name in trainable_param_names:
+            print(f"    - {name}")
 
     def mvs_forward(
         self,
