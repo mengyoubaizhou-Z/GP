@@ -159,6 +159,384 @@ class ModelWrapper(LightningModule):
 
         self.automatic_optimization = self.encoder.gaussian_head.num_patchs == 1 if hasattr(self.encoder, "gaussian_head") else True
 
+    def _robust_normalize01(self, x, eps=1e-6):
+        x = x.detach().float()
+        finite = torch.isfinite(x)
+        if not finite.any():
+            return torch.zeros_like(x)
+
+        valid = x[finite]
+        q_low = torch.quantile(valid, 0.02)
+        q_high = torch.quantile(valid, 0.98)
+        denom = q_high - q_low
+        if not torch.isfinite(denom) or denom.abs() < eps:
+            return torch.zeros_like(x)
+
+        normalized = (x - q_low) / denom.clamp_min(eps)
+        normalized = torch.nan_to_num(normalized, nan=0.0, posinf=1.0, neginf=0.0)
+        return normalized.clamp(0.0, 1.0)
+
+    def _as_bvhw_mvs_tensor(self, x, batch_size, num_views, name):
+        if x is None:
+            return None
+
+        if not torch.is_tensor(x):
+            print(f"[mvs_debug] Warning: {name} is not a tensor: {type(x)}")
+            return None
+
+        if x.ndim == 5 and x.shape[:3] == (batch_size, num_views, 1):
+            return x[:, :, 0]
+
+        if x.ndim == 4:
+            if x.shape[:2] == (batch_size, num_views):
+                return x
+            if x.shape[0] == batch_size * num_views and x.shape[1] == 1:
+                return rearrange(
+                    x,
+                    "(v b) 1 h w -> b v h w",
+                    v=num_views,
+                    b=batch_size,
+                )
+
+        print(
+            "[mvs_debug] Warning: could not convert "
+            f"{name} with shape {tuple(x.shape)} to [B,V,H,W] "
+            f"for B={batch_size}, V={num_views}"
+        )
+        return None
+
+    def _resize_bvhw_to_context(self, x, target_hw, mode="bilinear"):
+        batch_size, num_views, _, _ = x.shape
+        x_flat = rearrange(x, "b v h w -> (b v) 1 h w")
+        if mode == "bilinear":
+            x_flat = F.interpolate(
+                x_flat,
+                size=target_hw,
+                mode=mode,
+                align_corners=False,
+            )
+        else:
+            x_flat = F.interpolate(x_flat, size=target_hw, mode=mode)
+        return rearrange(
+            x_flat,
+            "(b v) 1 h w -> b v h w",
+            b=batch_size,
+            v=num_views,
+        )
+
+    def _as_bvdhw_mvs_tensor(self, x, batch_size, num_views, name):
+        if x is None:
+            return None
+
+        if not torch.is_tensor(x):
+            print(f"[mvs_debug] Warning: {name} is not a tensor: {type(x)}")
+            return None
+
+        if x.ndim == 5 and x.shape[:2] == (batch_size, num_views):
+            return x
+
+        if x.ndim == 4 and x.shape[0] == batch_size * num_views:
+            return rearrange(
+                x,
+                "(v b) d h w -> b v d h w",
+                v=num_views,
+                b=batch_size,
+            )
+
+        print(
+            "[mvs_debug] Warning: could not convert "
+            f"{name} with shape {tuple(x.shape)} to [B,V,D,H,W] "
+            f"for B={batch_size}, V={num_views}"
+        )
+        return None
+
+    def _compute_mvs_uncertainty_maps(self, stage, batch_size, num_views, stage_name):
+        raw_correlation = self._as_bvdhw_mvs_tensor(
+            stage.get("raw_correlation"),
+            batch_size,
+            num_views,
+            f"{stage_name}.raw_correlation",
+        )
+        disp_candidates = self._as_bvdhw_mvs_tensor(
+            stage.get("disp_candi_curr"),
+            batch_size,
+            num_views,
+            f"{stage_name}.disp_candi_curr",
+        )
+        if raw_correlation is None or disp_candidates is None:
+            return None
+
+        logits = raw_correlation.detach().float()
+        pdf = F.softmax(logits, dim=2)
+        pdf = torch.nan_to_num(pdf, nan=0.0, posinf=0.0, neginf=0.0)
+
+        num_depth_candidates = pdf.shape[2]
+        entropy = -(pdf * (pdf.clamp_min(1e-8).log())).sum(dim=2)
+        entropy = entropy / max(np.log(num_depth_candidates), 1e-6)
+
+        top2 = torch.topk(pdf, k=min(2, num_depth_candidates), dim=2).values
+        if num_depth_candidates == 1:
+            top1_top2_margin = top2[:, :, 0]
+        else:
+            top1_top2_margin = top2[:, :, 0] - top2[:, :, 1]
+
+        depth_candidates = torch.where(
+            disp_candidates > 0,
+            1.0 / disp_candidates.detach().float().clamp_min(1e-6),
+            torch.zeros_like(disp_candidates, dtype=torch.float32),
+        )
+        mean_depth = (pdf * depth_candidates).sum(dim=2, keepdim=True)
+        depth_variance = (pdf * (depth_candidates - mean_depth).square()).sum(dim=2)
+
+        return {
+            "entropy": entropy,
+            "top1_top2_margin": top1_top2_margin,
+            "depth_variance": depth_variance,
+        }
+
+    def _save_mvs_debug_maps(self, batch, encoder_outputs, batch_idx):
+        try:
+            trainer = self.trainer
+        except RuntimeError:
+            trainer = None
+        if trainer is not None and hasattr(trainer, "is_global_zero") and not trainer.is_global_zero:
+            return
+
+        mvs_outputs = encoder_outputs.get("mvs_outputs", None)
+        if mvs_outputs is None:
+            return
+        if "depth" not in mvs_outputs or "photometric_confidence" not in mvs_outputs:
+            print(
+                "[mvs_debug] Warning: mvs_outputs is missing depth or "
+                "photometric_confidence; skipping MVS debug maps."
+            )
+            return
+
+        with torch.no_grad():
+            context_rgb = batch["context"]["image"].detach()
+            batch_size, num_views, _, height, width = context_rgb.shape
+            target_hw = (height, width)
+
+            depth = self._as_bvhw_mvs_tensor(
+                mvs_outputs.get("depth"),
+                batch_size,
+                num_views,
+                "mvs_outputs.depth",
+            )
+            confidence = self._as_bvhw_mvs_tensor(
+                mvs_outputs.get("photometric_confidence"),
+                batch_size,
+                num_views,
+                "mvs_outputs.photometric_confidence",
+            )
+            if depth is None or confidence is None:
+                return
+
+            disp_raw = self._as_bvhw_mvs_tensor(
+                mvs_outputs.get("disp"),
+                batch_size,
+                num_views,
+                "mvs_outputs.disp",
+            )
+            disp_source = "mvs_outputs.disp"
+            if disp_raw is None:
+                disp = torch.where(
+                    depth > 0,
+                    1.0 / depth.clamp_min(1e-6),
+                    torch.zeros_like(depth),
+                )
+                disp_source = "inverse_depth"
+            else:
+                disp = disp_raw
+
+            depth_up = self._resize_bvhw_to_context(depth, target_hw)
+            disp_up = self._resize_bvhw_to_context(disp, target_hw)
+            confidence_up = self._resize_bvhw_to_context(confidence, target_hw)
+
+            scene = str(batch["scene"][0])
+            name = batch.get("name", None)
+            name = "none" if name is None else str(name[0])
+            dis = batch.get("dis", None)
+            if dis is None:
+                dis = "none"
+            else:
+                dis = dis[0].item() if torch.is_tensor(dis[0]) else dis[0]
+                dis = str(dis)
+
+            def safe_path_part(value):
+                return str(value).replace("/", "_").replace("\\", "_")
+
+            out_dir = (
+                Path(self.logger.save_dir)
+                / "test"
+                / "mvs_debug"
+                / f"{safe_path_part(name)}_{safe_path_part(dis)}"
+                / safe_path_part(scene)
+                / f"batch_{batch_idx:06d}"
+            )
+
+            context_indices = batch["context"]["index"].detach()
+
+            def save_debug_set(root, depth_bvhw, disp_bvhw, confidence_bvhw, save_raw_confidence):
+                for view_idx in range(num_views):
+                    index = context_indices[0, view_idx]
+                    index = int(index.item()) if torch.is_tensor(index) else int(index)
+
+                    depth_norm = self._robust_normalize01(depth_bvhw[0, view_idx])
+                    disp_norm = self._robust_normalize01(disp_bvhw[0, view_idx])
+                    conf_raw = torch.nan_to_num(
+                        confidence_bvhw[0, view_idx].detach().float(),
+                        nan=0.0,
+                        posinf=1.0,
+                        neginf=0.0,
+                    ).clamp(0.0, 1.0)
+                    conf_norm = self._robust_normalize01(confidence_bvhw[0, view_idx])
+                    low_conf = (1.0 - conf_norm).clamp(0.0, 1.0)
+
+                    depth_color = apply_color_map_to_image(depth_norm, "turbo")
+                    disp_color = apply_color_map_to_image(disp_norm, "turbo")
+                    conf_norm_color = apply_color_map_to_image(conf_norm, "viridis")
+                    low_conf_color = apply_color_map_to_image(low_conf, "magma")
+
+                    save_image(depth_color, root / "mvs_depth" / f"{index:06d}.png")
+                    save_image(disp_color, root / "mvs_disparity" / f"{index:06d}.png")
+                    save_image(conf_norm_color, root / "mvs_confidence_norm" / f"{index:06d}.png")
+                    save_image(low_conf_color, root / "mvs_low_confidence" / f"{index:06d}.png")
+
+                    if save_raw_confidence:
+                        conf_raw_color = apply_color_map_to_image(conf_raw, "viridis")
+                        low_conf_overlay = (
+                            0.6 * context_rgb[0, view_idx].detach().float().clamp(0.0, 1.0)
+                            + 0.4 * low_conf_color
+                        ).clamp(0.0, 1.0)
+                        save_image(context_rgb[0, view_idx], root / "context_rgb" / f"{index:06d}.png")
+                        save_image(
+                            conf_raw_color,
+                            root / "mvs_confidence_raw" / f"{index:06d}.png",
+                        )
+                        save_image(
+                            low_conf_overlay,
+                            root / "mvs_low_conf_overlay" / f"{index:06d}.png",
+                        )
+
+            def save_uncertainty_set(root, uncertainty_maps):
+                entropy_up = self._resize_bvhw_to_context(
+                    uncertainty_maps["entropy"],
+                    target_hw,
+                )
+                margin_up = self._resize_bvhw_to_context(
+                    uncertainty_maps["top1_top2_margin"],
+                    target_hw,
+                )
+                variance_up = self._resize_bvhw_to_context(
+                    uncertainty_maps["depth_variance"],
+                    target_hw,
+                )
+
+                for view_idx in range(num_views):
+                    index = context_indices[0, view_idx]
+                    index = int(index.item()) if torch.is_tensor(index) else int(index)
+
+                    entropy = torch.nan_to_num(
+                        entropy_up[0, view_idx].detach().float(),
+                        nan=0.0,
+                        posinf=1.0,
+                        neginf=0.0,
+                    ).clamp(0.0, 1.0)
+                    margin = torch.nan_to_num(
+                        margin_up[0, view_idx].detach().float(),
+                        nan=0.0,
+                        posinf=1.0,
+                        neginf=0.0,
+                    ).clamp(0.0, 1.0)
+                    variance_norm = self._robust_normalize01(variance_up[0, view_idx])
+
+                    save_image(
+                        apply_color_map_to_image(entropy, "magma"),
+                        root / "mvs_entropy" / f"{index:06d}.png",
+                    )
+                    save_image(
+                        apply_color_map_to_image(margin, "viridis"),
+                        root / "mvs_top1_top2_margin" / f"{index:06d}.png",
+                    )
+                    save_image(
+                        apply_color_map_to_image(variance_norm, "turbo"),
+                        root / "mvs_depth_variance" / f"{index:06d}.png",
+                    )
+
+            save_debug_set(out_dir, depth_up, disp_up, confidence_up, True)
+
+            raw_tensors = {
+                "depth": depth.detach().cpu(),
+                "depth_up": depth_up.detach().cpu(),
+                "disp_source": disp_source,
+                "photometric_confidence": confidence.detach().cpu(),
+                "photometric_confidence_up": confidence_up.detach().cpu(),
+                "context_indices": context_indices.detach().cpu(),
+                "scene": scene,
+                "batch_idx": batch_idx,
+            }
+            if disp_raw is not None:
+                raw_tensors["disp"] = disp_raw.detach().cpu()
+                raw_tensors["disp_up"] = disp_up.detach().cpu()
+            else:
+                raw_tensors["disp_visualization"] = disp.detach().cpu()
+                raw_tensors["disp_visualization_up"] = disp_up.detach().cpu()
+            out_dir.mkdir(exist_ok=True, parents=True)
+            torch.save(raw_tensors, out_dir / "raw_tensors.pt")
+
+            for stage_idx, stage in enumerate(mvs_outputs.get("stages", [])):
+                if "depth" not in stage or "photometric_confidence" not in stage:
+                    continue
+
+                stage_depth = self._as_bvhw_mvs_tensor(
+                    stage.get("depth"),
+                    batch_size,
+                    num_views,
+                    f"mvs_outputs.stages[{stage_idx}].depth",
+                )
+                stage_confidence = self._as_bvhw_mvs_tensor(
+                    stage.get("photometric_confidence"),
+                    batch_size,
+                    num_views,
+                    f"mvs_outputs.stages[{stage_idx}].photometric_confidence",
+                )
+                if stage_depth is None or stage_confidence is None:
+                    continue
+
+                stage_disp = self._as_bvhw_mvs_tensor(
+                    stage.get("disp"),
+                    batch_size,
+                    num_views,
+                    f"mvs_outputs.stages[{stage_idx}].disp",
+                )
+                if stage_disp is None:
+                    stage_disp = torch.where(
+                        stage_depth > 0,
+                        1.0 / stage_depth.clamp_min(1e-6),
+                        torch.zeros_like(stage_depth),
+                    )
+
+                stage_depth_up = self._resize_bvhw_to_context(stage_depth, target_hw)
+                stage_disp_up = self._resize_bvhw_to_context(stage_disp, target_hw)
+                stage_confidence_up = self._resize_bvhw_to_context(stage_confidence, target_hw)
+                save_debug_set(
+                    out_dir / f"stage_{stage_idx}",
+                    stage_depth_up,
+                    stage_disp_up,
+                    stage_confidence_up,
+                    False,
+                )
+                if stage_idx in (1, 2):
+                    uncertainty_maps = self._compute_mvs_uncertainty_maps(
+                        stage,
+                        batch_size,
+                        num_views,
+                        f"mvs_outputs.stages[{stage_idx}]",
+                    )
+                    if uncertainty_maps is not None:
+                        save_uncertainty_set(out_dir / f"stage_{stage_idx}", uncertainty_maps)
+
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
 
@@ -309,6 +687,8 @@ class ModelWrapper(LightningModule):
 
         # Render Gaussians.
         encoder_outputs = self.encoder(batch["context"], self.global_step)
+        if self.test_cfg.save_image:
+            self._save_mvs_debug_maps(batch, encoder_outputs, batch_idx)
         gaussians = encoder_outputs.pop("gaussians", {}).pop("gaussians", None)
 
         if self.test_cfg.compute_scores:
