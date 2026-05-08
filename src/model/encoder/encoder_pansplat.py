@@ -15,6 +15,10 @@ from .visualization.encoder_visualizer_cfg import EncoderVisualizerCostVolumeCfg
 
 from ...global_cfg import get_cfg
 from .gaussian_head import GaussianHead
+from .geometry_reliability import (
+    GeometryReliabilityCfg,
+    compute_geometry_reliability,
+)
 from torch.nn import functional as F
 from .unifuse.networks.convert_module import erp_convert
 import os
@@ -67,6 +71,7 @@ class EncoderPanSplatCfg:
     backbone_transformer_adapter_use_inner_residual: bool = False
     backbone_transformer_adapter_dropout: float = 0.1
     backbone_trainable_modules: List[str] | None = None
+    geometry_reliability: GeometryReliabilityCfg | None = None
 
 
 class EncoderPanSplat(Encoder[EncoderPanSplatCfg]):
@@ -297,6 +302,25 @@ class EncoderPanSplat(Encoder[EncoderPanSplatCfg]):
             context["near"],
             context["far"],
         )
+
+        geometry_cfg = self.cfg.geometry_reliability
+        if isinstance(geometry_cfg, dict):
+            geometry_cfg = GeometryReliabilityCfg(**geometry_cfg)
+        if geometry_cfg is not None and geometry_cfg.enable:
+            should_compute = (
+                (self.training and geometry_cfg.compute_in_train)
+                or ((not self.training) and geometry_cfg.compute_in_eval)
+            )
+            if should_compute:
+                geo_outputs = compute_geometry_reliability(
+                    depth=mvs_outputs["depth"],
+                    photometric_confidence=mvs_outputs.get("photometric_confidence"),
+                    extrinsics=context["extrinsics"],
+                    near=context["near"],
+                    far=context["far"],
+                    cfg=geometry_cfg,
+                )
+                mvs_outputs.update(geo_outputs)
 
         if visualization_dump is not None:
             visualization_dump["depth_wo_refine"] = [

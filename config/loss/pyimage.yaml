@@ -2,6 +2,12 @@ pyimage:
   gaussian_head:
     num_surfaces: 1
     gaussians_per_pixel: 1
+    geo_condition:
+      enable: false
+      mode: "concat"
+      channels: ["reproj", "photo", "conflict", "valid"]
+      detach_inputs: true
+      invalid_reliability: 0.5
     opacity_mapping:
       initial: 0.0
       final: 0.0

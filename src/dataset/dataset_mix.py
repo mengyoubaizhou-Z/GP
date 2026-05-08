@@ -42,6 +42,21 @@ class DatasetMixCfg(DatasetCfgCommon):
     cache_images: bool = True
     include_nested_sequences: bool = False
 
+    # If these ratios are set, each scene's sampling count is computed from
+    # its own frame count instead of using a fixed count for every scene:
+    #
+    #   train samples per scene = round(num_frames * train_sample_ratio)
+    #   val/test samples per scene = round(num_frames * eval_sample_ratio)
+    #
+    # If either ratio is None, the original fixed-count behavior is kept:
+    #
+    #   train: train_times_per_scene
+    #   val/test: view_sampler.test_times_per_scene
+    train_sample_ratio: float | None = None
+    eval_sample_ratio: float | None = None
+    min_times_per_scene: int = 1
+    max_times_per_scene: int | None = None
+
 
 class DatasetMix(IterableDataset):
     cfg: DatasetMixCfg
@@ -79,11 +94,6 @@ class DatasetMix(IterableDataset):
             self.data = [self.root / self.cfg.overfit_to_scene]
 
         self.e2c_mono = Equirec2Cube(512, 1024, 256)
-        self.times_per_scene = (
-            self.cfg.train_times_per_scene
-            if self.stage == "train"
-            else self.view_sampler.cfg.test_times_per_scene
-        )
         self.load_images = True
 
     def discover_sequences(self, root: Path) -> list[Path]:
@@ -167,6 +177,41 @@ class DatasetMix(IterableDataset):
         extrinsics = [self.load_extrinsics(example)[1] for example in self.data]
         return sum(len(e) for e in extrinsics)
 
+    def get_times_per_scene(self, num_views: int) -> int:
+        """Return how many samples should be drawn from one scene in one pass.
+
+        Original behavior:
+            train -> cfg.train_times_per_scene
+            val/test -> cfg.view_sampler.test_times_per_scene
+
+        Ratio behavior:
+            train -> round(num_views * cfg.train_sample_ratio)
+            val/test -> round(num_views * cfg.eval_sample_ratio)
+        """
+        if self.stage == "train":
+            if self.cfg.train_sample_ratio is None:
+                times = self.cfg.train_times_per_scene
+            else:
+                if self.cfg.train_sample_ratio <= 0:
+                    raise ValueError("train_sample_ratio must be positive when set")
+                times = int(round(num_views * self.cfg.train_sample_ratio))
+        else:
+            if self.cfg.eval_sample_ratio is None:
+                times = self.view_sampler.cfg.test_times_per_scene
+            else:
+                if self.cfg.eval_sample_ratio <= 0:
+                    raise ValueError("eval_sample_ratio must be positive when set")
+                times = int(round(num_views * self.cfg.eval_sample_ratio))
+
+        times = max(self.cfg.min_times_per_scene, times)
+
+        if self.cfg.max_times_per_scene is not None:
+            if self.cfg.max_times_per_scene <= 0:
+                raise ValueError("max_times_per_scene must be positive when set")
+            times = min(self.cfg.max_times_per_scene, times)
+
+        return times
+
     def __iter__(self):
         if self.stage in (("train", "val") if self.cfg.shuffle_val else ("train")):
             self.data = self.shuffle(self.data)
@@ -183,16 +228,18 @@ class DatasetMix(IterableDataset):
             frames, extrinsics_orig = self.load_extrinsics(example_path)
             image_dir = self.get_image_dir(example_path)
             scene = str(example_path.relative_to(self.root))
+            times_per_scene = self.get_times_per_scene(len(frames))
 
             if self.cfg.cache_images and self.stage == "train" and self.load_images:
                 images = [image_dir / frame for frame in frames]
                 images = self.convert_images(images)
 
-            for i in range(self.times_per_scene):
+            for i in range(times_per_scene):
                 context_indices, target_indices = self.view_sampler.sample(
                     scene,
                     extrinsics_orig,
                     i=i,
+                    times_per_scene=times_per_scene,
                 )
                 if context_indices is None:
                     break
@@ -298,4 +345,8 @@ class DatasetMix(IterableDataset):
         return repeat(value, "-> v", v=num_views)
 
     def __len__(self) -> int:
-        return len(self.data) * self.times_per_scene
+        total = 0
+        for example in self.data:
+            frames, _ = self.load_extrinsics(example)
+            total += self.get_times_per_scene(len(frames))
+        return total

@@ -150,9 +150,25 @@ class ModelWrapper(LightningModule):
                 load_state_dict = torch.load(weights_path)["state_dict"]
                 state_dict = self.state_dict()
                 new_state_dict = {}
+                skipped_shape_mismatch = []
                 for k, v in load_state_dict.items():
                     if k in state_dict and state_dict[k].shape == v.shape:
                         new_state_dict[k] = v
+                    elif k in state_dict:
+                        skipped_shape_mismatch.append((k, tuple(v.shape), tuple(state_dict[k].shape)))
+                if skipped_shape_mismatch:
+                    print(
+                        "==> Warning: skipped checkpoint weights with shape mismatch. "
+                        "This is expected if a non-geo-concat checkpoint is loaded into "
+                        "a geo-concat GaussianHead, but 512 geo-concat training should "
+                        "load a 256 geo-concat checkpoint."
+                    )
+                    for key, loaded_shape, current_shape in skipped_shape_mismatch[:40]:
+                        print(
+                            f"    - {key}: checkpoint {loaded_shape} -> model {current_shape}"
+                        )
+                    if len(skipped_shape_mismatch) > 40:
+                        print(f"    - ... {len(skipped_shape_mismatch) - 40} more mismatched keys")
                 self.load_state_dict(new_state_dict, strict=False)
             else:
                 print(f"==> Weights path {weights_path} does not exist for testing, skipping loading")
@@ -537,6 +553,117 @@ class ModelWrapper(LightningModule):
                     if uncertainty_maps is not None:
                         save_uncertainty_set(out_dir / f"stage_{stage_idx}", uncertainty_maps)
 
+    def _save_geometry_reliability_maps(self, batch, encoder_outputs, batch_idx):
+        try:
+            trainer = self.trainer
+        except RuntimeError:
+            trainer = None
+        if trainer is not None and hasattr(trainer, "is_global_zero") and not trainer.is_global_zero:
+            return
+
+        mvs_outputs = encoder_outputs.get("mvs_outputs", None)
+        if mvs_outputs is None or "geometry_reliability" not in mvs_outputs:
+            return
+
+        with torch.no_grad():
+            context_rgb = batch["context"]["image"].detach()
+            batch_size, num_views, _, height, width = context_rgb.shape
+            target_hw = (height, width)
+
+            reliability = self._as_bvhw_mvs_tensor(
+                mvs_outputs.get("geometry_reliability"),
+                batch_size,
+                num_views,
+                "mvs_outputs.geometry_reliability",
+            )
+            error = self._as_bvhw_mvs_tensor(
+                mvs_outputs.get("geometry_error"),
+                batch_size,
+                num_views,
+                "mvs_outputs.geometry_error",
+            )
+            conflict = self._as_bvhw_mvs_tensor(
+                mvs_outputs.get("geometry_conflict"),
+                batch_size,
+                num_views,
+                "mvs_outputs.geometry_conflict",
+            )
+            valid = self._as_bvhw_mvs_tensor(
+                mvs_outputs.get("geometry_valid"),
+                batch_size,
+                num_views,
+                "mvs_outputs.geometry_valid",
+            )
+            if reliability is None:
+                return
+            if error is None:
+                error = torch.zeros_like(reliability)
+            if conflict is None:
+                conflict = torch.zeros_like(reliability)
+            if valid is None:
+                valid = torch.zeros_like(reliability)
+
+            reliability_up = self._resize_bvhw_to_context(reliability, target_hw)
+            error_up = self._resize_bvhw_to_context(error, target_hw)
+            conflict_up = self._resize_bvhw_to_context(conflict, target_hw)
+            valid_up = self._resize_bvhw_to_context(valid, target_hw, mode="nearest")
+
+            scene = str(batch["scene"][0])
+
+            def safe_path_part(value):
+                return str(value).replace("/", "_").replace("\\", "_")
+
+            out_dir = (
+                Path(self.logger.save_dir)
+                / "test"
+                / "geometry_reliability"
+                / safe_path_part(scene)
+                / f"batch_{batch_idx:06d}"
+            )
+
+            context_indices = batch["context"]["index"].detach()
+            for view_idx in range(num_views):
+                index = context_indices[0, view_idx]
+                index = int(index.item()) if torch.is_tensor(index) else int(index)
+
+                rel = torch.nan_to_num(
+                    reliability_up[0, view_idx].detach().float(),
+                    nan=0.0,
+                    posinf=1.0,
+                    neginf=0.0,
+                ).clamp(0.0, 1.0)
+                err = self._robust_normalize01(error_up[0, view_idx])
+                con = torch.nan_to_num(
+                    conflict_up[0, view_idx].detach().float(),
+                    nan=0.0,
+                    posinf=1.0,
+                    neginf=0.0,
+                ).clamp(0.0, 1.0)
+                val = torch.nan_to_num(
+                    valid_up[0, view_idx].detach().float(),
+                    nan=0.0,
+                    posinf=1.0,
+                    neginf=0.0,
+                ).clamp(0.0, 1.0)
+
+                rel_color = apply_color_map_to_image(rel, "viridis")
+                err_color = apply_color_map_to_image(err, "magma")
+                con_color = apply_color_map_to_image(con, "magma")
+                val_color = apply_color_map_to_image(val, "gray")
+                overlay = (
+                    0.6 * context_rgb[0, view_idx].detach().float().clamp(0.0, 1.0)
+                    + 0.4 * con_color
+                ).clamp(0.0, 1.0)
+
+                save_image(rel_color, out_dir / "geometry_reliability" / f"{index:06d}.png")
+                save_image(err_color, out_dir / "geometry_error" / f"{index:06d}.png")
+                save_image(con_color, out_dir / "geometry_conflict" / f"{index:06d}.png")
+                save_image(val_color, out_dir / "geometry_valid" / f"{index:06d}.png")
+                save_image(
+                    overlay,
+                    out_dir / "geometry_conflict_overlay" / f"{index:06d}.png",
+                )
+
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
 
@@ -689,6 +816,7 @@ class ModelWrapper(LightningModule):
         encoder_outputs = self.encoder(batch["context"], self.global_step)
         if self.test_cfg.save_image:
             self._save_mvs_debug_maps(batch, encoder_outputs, batch_idx)
+            self._save_geometry_reliability_maps(batch, encoder_outputs, batch_idx)
         gaussians = encoder_outputs.pop("gaussians", {}).pop("gaussians", None)
 
         if self.test_cfg.compute_scores:

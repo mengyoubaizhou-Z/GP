@@ -6,6 +6,7 @@ from torch import Tensor, nn
 from ...geometry.projection import sample_image_grid
 from ..types import Gaussians
 from .common.gaussian_adapter import GaussianAdapter
+from .geometry_reliability import as_bv1hw
 
 import torch.nn.functional as F
 import numpy as np
@@ -117,6 +118,7 @@ class GaussianHead(nn.Module):
         use_latitude_aware_conv=False,
         latitude_aware_conv_freqs=2,
         latitude_aware_dilations=(1, 2, 4),
+        geo_condition=None,
     ):
         super().__init__()
         # Configs from the encoder
@@ -162,6 +164,32 @@ class GaussianHead(nn.Module):
         self.use_latlon_embedding = use_latlon_embedding
         self.latlon_embedding_freqs = latlon_embedding_freqs
         self.latlon_embedding_dim = 4 * latlon_embedding_freqs if use_latlon_embedding else 0
+        geo_condition = {} if geo_condition is None else geo_condition
+        self.geo_condition_enable = bool(geo_condition.get("enable", False))
+        self.geo_condition_mode = geo_condition.get("mode", "concat")
+        if self.geo_condition_enable and self.geo_condition_mode != "concat":
+            raise ValueError(
+                "GaussianHead geo_condition only supports mode='concat'. "
+                f"Got mode={self.geo_condition_mode!r}."
+            )
+        self.geo_condition_channels = list(
+            geo_condition.get(
+                "channels",
+                ["reproj", "photo", "conflict", "valid"],
+            )
+        )
+        supported_geo_channels = {"reproj", "photo", "conflict", "valid"}
+        unsupported_geo_channels = set(self.geo_condition_channels) - supported_geo_channels
+        if unsupported_geo_channels:
+            raise ValueError(f"Unsupported geo_condition channels: {sorted(unsupported_geo_channels)}")
+        self.geo_condition_detach_inputs = bool(geo_condition.get("detach_inputs", True))
+        self.geo_condition_invalid_reliability = float(
+            geo_condition.get("invalid_reliability", 0.5)
+        )
+        self.geo_condition_channels_count = (
+            len(self.geo_condition_channels) if self.geo_condition_enable else 0
+        )
+        self._warned_missing_geo_condition = False
 
         self.to_gaussians_list = nn.ModuleList()
         if not wo_fibo_gs:
@@ -202,6 +230,7 @@ class GaussianHead(nn.Module):
             gau_in = 3 + num_depth_candidates + self.latlon_embedding_dim
             if not wo_feat:
                 gau_in += feature_channels
+            gau_in += self.geo_condition_channels_count
             gau_out = self.gaussian_raw_channels
             if not wo_disp_dens_refine:
                 gau_out += gaussians_per_pixel + gaussians_per_pixel * num_depth_candidates
@@ -378,16 +407,146 @@ class GaussianHead(nn.Module):
         # must be called after forward
         self.padded_cache = [{} for _ in range(self.gh_stages)]
 
-    def cache_padding(self, f, stage_idx, key):
+    def cache_padding(self, f, stage_idx, key, mode="bilinear"):
         if not hasattr(self, "padded_cache"):
             self.clean_padded_cache()
         stage = self.padded_cache[stage_idx]
         if key in stage:
             return stage[key]
-        full = F.interpolate(f, size=self.full_shape[stage_idx], mode="bilinear")
+        full = F.interpolate(f, size=self.full_shape[stage_idx], mode=mode)
         full = pad_pano(full, self.padding)
         stage[key] = full
         return full
+
+    def _warn_missing_geo_condition_once(self):
+        if not self._warned_missing_geo_condition:
+            print(
+                "==> Warning: GaussianHead geo_condition is enabled, but "
+                "mvs_outputs is missing geometry_reliability. Using default "
+                "invalid reliability/zero valid/zero conflict channels. "
+                "If this is a 512 geo-concat run, make sure the loaded "
+                "checkpoint was trained with the same geo-concat head."
+            )
+            self._warned_missing_geo_condition = True
+
+    def _geo_tensor_or_default(
+        self,
+        outputs,
+        key,
+        batch_size,
+        num_views,
+        spatial_shape,
+        fill_value,
+        device,
+        dtype,
+    ):
+        value = outputs.get(key, None)
+        if value is None:
+            return torch.full(
+                (batch_size, num_views, 1, *spatial_shape),
+                fill_value,
+                device=device,
+                dtype=dtype,
+            )
+
+        try:
+            return as_bv1hw(value, batch_size, num_views, key).to(device=device, dtype=dtype)
+        except ValueError as exc:
+            print(f"==> Warning: {exc} Using default {key} geo_condition channel.")
+            return torch.full(
+                (batch_size, num_views, 1, *spatial_shape),
+                fill_value,
+                device=device,
+                dtype=dtype,
+            )
+
+    def _infer_geo_spatial_shape(self, outputs):
+        for key in (
+            "geometry_reliability",
+            "photometric_confidence",
+            "geometry_conflict",
+            "geometry_valid",
+            "depth",
+            "raw_correlation",
+        ):
+            value = outputs.get(key, None)
+            if torch.is_tensor(value) and value.ndim >= 4:
+                return value.shape[-2:]
+        raise ValueError(
+            "GaussianHead geo_condition is enabled, but no tensor in mvs_outputs "
+            "can provide a spatial shape for default geo_condition channels."
+        )
+
+    def build_geo_condition(self, outputs, b, v, stage_idx, patch_idx, reference):
+        if not self.geo_condition_enable:
+            return None
+
+        if "geometry_reliability" not in outputs:
+            self._warn_missing_geo_condition_once()
+
+        spatial_shape = self._infer_geo_spatial_shape(outputs)
+        device = reference.device
+        dtype = reference.dtype
+        tensors = {
+            "reproj": self._geo_tensor_or_default(
+                outputs,
+                "geometry_reliability",
+                b,
+                v,
+                spatial_shape,
+                self.geo_condition_invalid_reliability,
+                device,
+                dtype,
+            ),
+            "photo": self._geo_tensor_or_default(
+                outputs,
+                "photometric_confidence",
+                b,
+                v,
+                spatial_shape,
+                0.0,
+                device,
+                dtype,
+            ),
+            "conflict": self._geo_tensor_or_default(
+                outputs,
+                "geometry_conflict",
+                b,
+                v,
+                spatial_shape,
+                0.0,
+                device,
+                dtype,
+            ),
+            "valid": self._geo_tensor_or_default(
+                outputs,
+                "geometry_valid",
+                b,
+                v,
+                spatial_shape,
+                0.0,
+                device,
+                dtype,
+            ),
+        }
+
+        geo_channels = []
+        for channel in self.geo_condition_channels:
+            tensor = rearrange(tensors[channel], "b v 1 h w -> (v b) 1 h w")
+            mode = "nearest" if channel == "valid" else "bilinear"
+            tensor = self.crop_patch(
+                tensor,
+                stage_idx,
+                patch_idx,
+                f"geo_condition_{channel}",
+                mode=mode,
+            )
+            geo_channels.append(tensor)
+
+        geo_condition = torch.cat(geo_channels, dim=1)
+        if self.geo_condition_detach_inputs:
+            geo_condition = geo_condition.detach()
+        return geo_condition
 
     def patch_forward(self, outputs, context, global_step=None, patch_idx=0):
         b, v, c, _, _ = context['image'].shape
@@ -429,6 +588,16 @@ class GaussianHead(nn.Module):
                 raw_gaussians_in.append(latlon)
             if not self.wo_feat:
                 raw_gaussians_in.insert(1, features)
+            geo_condition = self.build_geo_condition(
+                outputs,
+                b,
+                v,
+                stage_idx,
+                patch_idx,
+                images,
+            )
+            if geo_condition is not None:
+                raw_gaussians_in.append(geo_condition)
             raw_gaussians_in = torch.cat(raw_gaussians_in, dim=1)
             latitude = None
             if self.use_latitude_aware_conv:
@@ -537,8 +706,8 @@ class GaussianHead(nn.Module):
             gaussians['gaussians'] = Gaussians.from_list([g["gaussians"] for g in gaussians["stages"]])
         return gaussians
 
-    def crop_patch(self, f, stage_idx, patch_idx, key):
-        full = self.cache_padding(f, stage_idx, key)
+    def crop_patch(self, f, stage_idx, patch_idx, key, mode="bilinear"):
+        full = self.cache_padding(f, stage_idx, key, mode=mode)
         range_hw = getattr(self, f"range_hw_{stage_idx}_{patch_idx}")
         range_hw = range_hw + self.padding
         patch = full[..., range_hw[0, 0]:range_hw[0, 1], range_hw[1, 0]:range_hw[1, 1]]

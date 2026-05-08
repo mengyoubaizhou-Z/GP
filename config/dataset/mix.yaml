@@ -26,13 +26,27 @@ train_scenes:
   - drone_racetrack
   - mountains
   - 360vo_seq1
+  - 360vo_seq2
   - 360vo_seq3
   - 360vo_seq4
   - 360vo_seq6
+  - panocity_beijing_beijing_block17
+  - panocity_jinan_jinan_block8
+  - panocity_jinan_jinan_block20
+  - panocity_jinan_jinan_block27
+  - panocity_jinan_jinan_block40
+  - panocity_jinan_jinan_block55
+  - panocity_jinan_jinan_block63
+  - panocity_jinan_jinan_block72
+  - panocity_ningbo_ningbo_block27
+  - panocity_ningbo_ningbo_block35
+  - panocity_ningbo_ningbo_block39
 val_scenes:
-  - 360vo_seq2
-  - 360vo_seq7
+  - panocity_beijing_beijing_block7
+  - panocity_jinan_jinan_block1
+  - panocity_ningbo_ningbo_block20
 test_scenes:
+  - 360vo_seq7
   - 360vo_seq9
 include_nested_sequences: false
 

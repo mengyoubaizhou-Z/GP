@@ -9,6 +9,12 @@ num_depth_candidates: [128, 64, 32, 16]
 gaussian_head:
   num_surfaces: 1
   gaussians_per_pixel: 1
+  geo_condition:
+    enable: false
+    mode: "concat"
+    channels: ["reproj", "photo", "conflict", "valid"]
+    detach_inputs: true
+    invalid_reliability: 0.5
   opacity_mapping:
     initial: 0.0
     final: 0.0
@@ -40,6 +46,20 @@ gaussian_head:
     jacobian_scale_multiplier: 0.1
     jacobian_scale_radial_factor: 0.5
   deferred_blend: false
+
+geometry_reliability:
+  enable: false
+  compute_in_train: true
+  compute_in_eval: true
+  sigma_depth: 0.03
+  depth_error_type: "relative"
+  occlusion_margin: 0.03
+  min_depth: 1.0e-3
+  far_depth_margin: 0.98
+  invalid_reliability: 0.5
+  detach: true
+  aggregate: "min"
+  return_debug: true
 
 d_feature: [128, 96, 64, 32]
 

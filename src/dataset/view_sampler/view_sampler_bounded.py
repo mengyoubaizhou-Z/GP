@@ -34,6 +34,7 @@ class ViewSamplerBounded(ViewSampler[ViewSamplerBoundedCfg]):
         extrinsics: Float[Tensor, "view 4 4"],
         device: torch.device = torch.device("cpu"),
         i: int = 0,
+        times_per_scene: int | None = None,
     ) -> tuple[
         Int64[Tensor, " context_view"] | None,  # indices for context views
         Int64[Tensor, " target_view"] | None,  # indices for target views
@@ -79,7 +80,16 @@ class ViewSamplerBounded(ViewSampler[ViewSamplerBoundedCfg]):
             else:
                 return None, None
         elif self.stage == "test":
-            index_context_left = (num_views - context_gap - 1) * i / max((self.cfg.test_times_per_scene - 1), 1)
+            effective_times_per_scene = (
+                self.cfg.test_times_per_scene
+                if times_per_scene is None
+                else times_per_scene
+            )
+            index_context_left = (
+                (num_views - context_gap - 1)
+                * i
+                / max((effective_times_per_scene - 1), 1)
+            )
             index_context_left = int(index_context_left)
         else:
             index_context_left = torch.randint(
@@ -115,7 +125,7 @@ class ViewSamplerBounded(ViewSampler[ViewSamplerBoundedCfg]):
             #     device=device,
             # )
         else:
-            # When training or validating (visualizing), pick at random.
+            # When training, pick at random.
             index_target = torch.randint(
                 index_context_left + self.cfg.min_distance_to_context_views,
                 index_context_right + 1 - self.cfg.min_distance_to_context_views,

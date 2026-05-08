@@ -3,7 +3,7 @@
 defaults:
   - /model: pansplat
   - override /loss: [mse, lpips, pyimage]
-  - override /dataset: 360uav_360dvo_360vo
+  - override /dataset: mix
 
 wandb:
   name: pansplat-512-mix-spe-adapter-stage2-refine
