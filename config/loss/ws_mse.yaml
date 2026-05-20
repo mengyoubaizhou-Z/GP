@@ -1,4 +1,0 @@
-ws_mse:
-  weight: 1.0
-  eps: 1.0e-8
-  min_spherical_weight: 1.0e-6

@@ -2,12 +2,12 @@
 
 defaults:
   - /model: pansplat
-  - override /loss: [ws_mse, lpips, pyimage]
+  - override /loss: [mse, lpips, pyimage]
   - override /dataset: mix
 
 wandb:
-  name: pansplat-256-mix-spe-mona-multi-wsmse
-  tags: [pansplat, mix, 256x512, spherical-pe, mona-multi, weighted-sum, ws-mse]
+  name: pansplat-256-mix-spe-mona-multi-geo-concat
+  tags: [pansplat, mix, 256x512, spherical-pe, mona-multi, weighted-sum, geo-concat]
 
 data_loader:
   train:
@@ -48,12 +48,45 @@ model:
       - encoder.downsample3
       - encoder.conv30
       - encoder.conv31
+    geometry_reliability:
+      enable: true
+      compute_in_train: true
+      compute_in_eval: true
+      sigma_depth: 0.03
+      depth_error_type: "relative"
+      occlusion_margin: 0.03
+      min_depth: 1.0e-3
+      far_depth_margin: 0.98
+      invalid_reliability: 0.5
+      detach: true
+      aggregate: "min"
+      return_debug: true
     gaussian_head:
       deferred_blend: false
       patchs_height: 1
       patchs_width: 1
+      geo_condition:
+        enable: true
+        mode: "concat"
+        channels: ["reproj", "photo", "conflict", "valid"]
+        detach_inputs: true
+        invalid_reliability: 0.5
 
 dataset:
   image_shape: [256, 512]
   train_times_per_scene: 400
   cache_images: false
+  train_sample_ratio: 0.2
+  eval_sample_ratio: 0.1
+  min_times_per_scene: 20
+  max_times_per_scene: 400
+
+loss:
+  pyimage:
+    gaussian_head:
+      geo_condition:
+        enable: true
+        mode: "concat"
+        channels: ["reproj", "photo", "conflict", "valid"]
+        detach_inputs: true
+        invalid_reliability: 0.5
