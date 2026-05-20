@@ -48,6 +48,7 @@ checkpointing:
   monitor: val/psnr_val
   mode: max
   save_top_k: 1
+  save_latest_epoch: false
 
 train:
   depth_mode: null

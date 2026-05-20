@@ -1,0 +1,36 @@
+# @package _global_
+
+defaults:
+  - /experiment/ablate-256-baseline
+  - _self_
+
+wandb:
+  name: ablate-256-A
+  mode: offline
+  tags: [ablation, 256x512, mix_0, A, spherical-pe, panorama-adapter, spherical-cost-volume]
+
+model:
+  encoder:
+    # A1: 球面位置编码
+    backbone_position_embedding_type: "spherical"
+    backbone_position_embedding_hidden_dim: 128
+
+    # A2: 主干网络全景特征适配
+    freeze_backbone: true
+    backbone_use_feature_adapter: false
+    backbone_transformer_adapter_type: "mona_multi"
+    backbone_transformer_adapter_hidden_dim: 64
+    backbone_transformer_adapter_cross_hidden_dim: 128
+    backbone_transformer_adapter_kernel_sizes: [3, 5, 7]
+    backbone_transformer_adapter_fusion: "weighted_sum"
+    backbone_transformer_adapter_use_pointwise: true
+    backbone_transformer_adapter_use_inner_residual: true
+    backbone_transformer_adapter_dropout: 0.1
+    backbone_trainable_modules:
+      - transformer
+      - encoder.downsample3
+      - encoder.conv30
+      - encoder.conv31
+
+    # A3: 球面一致 ERP 特征采样 / 球面代价体
+    use_spherical_cost_volume_warp: true

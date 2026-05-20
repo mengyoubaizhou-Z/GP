@@ -14,13 +14,14 @@ from .model.model_wrapper import OptimizerCfg, TestCfg, TrainCfg, ValCfg, Predic
 
 @dataclass
 class CheckpointingCfg:
-    load: Optional[str]  # Not a path, since it could be something like wandb://...
+    load: Optional[str]
     every_n_train_steps: int | None
     train_time_interval: int | None
     pretrained_model: Optional[str]
     monitor: Optional[str] = None
     mode: Literal["min", "max"] = "max"
     save_top_k: int = 1
+    save_latest_epoch: bool = False
 
 
 @dataclass

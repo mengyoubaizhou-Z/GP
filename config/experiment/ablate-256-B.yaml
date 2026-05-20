@@ -1,0 +1,45 @@
+# @package _global_
+
+defaults:
+  - /experiment/ablate-256-baseline
+  - _self_
+
+wandb:
+  name: ablate-256-B
+  mode: offline
+  tags: [ablation, 256x512, mix_0, B, latlon-embedding, latitude-aware-conv, jacobian-gaussian]
+
+model:
+  encoder:
+    gaussian_head:
+      # B1: 高斯预测中的经纬度位置嵌入
+      use_latlon_embedding: true
+      latlon_embedding_freqs: 2
+
+      # B2: 纬度尺度感知卷积
+      use_latitude_aware_conv: true
+      latitude_aware_conv_freqs: 2
+      latitude_aware_dilations: [1, 2, 4]
+
+      # B3: 基于局部投影雅可比的高斯尺度与方向参数化
+      gaussian_adapter:
+        use_jacobian_aware_scale: true
+        use_jacobian_aware_basis: true
+        return_world_space_rotations: true
+        jacobian_scale_multiplier: 0.1
+        jacobian_scale_radial_factor: 0.5
+
+loss:
+  pyimage:
+    gaussian_head:
+      use_latlon_embedding: true
+      latlon_embedding_freqs: 2
+      use_latitude_aware_conv: true
+      latitude_aware_conv_freqs: 2
+      latitude_aware_dilations: [1, 2, 4]
+      gaussian_adapter:
+        use_jacobian_aware_scale: true
+        use_jacobian_aware_basis: true
+        return_world_space_rotations: true
+        jacobian_scale_multiplier: 0.1
+        jacobian_scale_radial_factor: 0.5

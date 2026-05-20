@@ -1,0 +1,42 @@
+# @package _global_
+
+defaults:
+  - /experiment/ablate-256-baseline
+  - _self_
+
+wandb:
+  name: ablate-512-baseline
+  mode: offline
+  tags: [ablation, 512x1024, mix_0, baseline]
+
+trainer:
+  max_epochs: 10
+  val_check_interval: 0.5
+  precision: 16-mixed
+
+optimizer:
+  lr: 5.e-5
+
+model:
+  weights_path: null
+  decoder:
+    view_batch: 1
+  encoder:
+    fpn_max_height: 512
+    gaussian_head:
+      deferred_blend: true
+      patchs_height: 2
+      patchs_width: 2
+
+dataset:
+  image_shape: [512, 1024]
+  train_times_per_scene: 400
+  cache_images: false
+
+loss:
+  pyimage:
+    decoder:
+      view_batch: 1
+    gaussian_head:
+      patchs_height: 2
+      patchs_width: 2

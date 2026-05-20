@@ -1,0 +1,46 @@
+# @package _global_
+
+defaults:
+  - /experiment/ablate-256-baseline
+  - _self_
+
+wandb:
+  name: ablate-256-C
+  mode: offline
+  tags: [ablation, 256x512, mix_0, C, geometry-reliability, geo-condition]
+
+model:
+  encoder:
+    # C1: 多视角几何可靠性估计
+    geometry_reliability:
+      enable: true
+      compute_in_train: true
+      compute_in_eval: true
+      sigma_depth: 0.03
+      depth_error_type: "relative"
+      occlusion_margin: 0.03
+      min_depth: 1.0e-3
+      far_depth_margin: 0.98
+      invalid_reliability: 0.5
+      detach: true
+      aggregate: "min"
+      return_debug: false
+
+    gaussian_head:
+      # C2: 几何条件特征拼接注入 Gaussian head
+      geo_condition:
+        enable: true
+        mode: "concat"
+        channels: ["reproj", "photo", "conflict", "valid"]
+        detach_inputs: true
+        invalid_reliability: 0.5
+
+loss:
+  pyimage:
+    gaussian_head:
+      geo_condition:
+        enable: true
+        mode: "concat"
+        channels: ["reproj", "photo", "conflict", "valid"]
+        detach_inputs: true
+        invalid_reliability: 0.5

@@ -114,6 +114,21 @@ def train(cfg_dict: DictConfig):
             train_time_interval=train_time_interval,
         )
     )
+
+    if cfg.checkpointing.save_latest_epoch:
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=checkpoint_folder,
+                filename="latest-epoch",
+                every_n_epochs=1,
+                save_top_k=1,
+                save_last=False,
+                monitor=None,
+                auto_insert_metric_name=False,
+                enable_version_counter=False,
+            )
+        )
+
     if cfg.checkpointing.monitor is not None and cfg.checkpointing.save_top_k > 0:
         callbacks.append(
             ModelCheckpoint(

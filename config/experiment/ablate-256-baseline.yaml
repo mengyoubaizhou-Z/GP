@@ -1,0 +1,91 @@
+# @package _global_
+
+defaults:
+  - /model: pansplat
+  - override /loss: [mse, lpips, pyimage]
+  - override /dataset: mix_0
+
+mode: train
+
+wandb:
+  name: ablate-256-baseline
+  mode: offline
+  tags: [ablation, 256x512, mix_0, baseline]
+
+data_loader:
+  train:
+    batch_size: 1
+    num_workers: 6
+  val:
+    batch_size: 1
+  test:
+    batch_size: 1
+
+trainer:
+  max_epochs: 10
+  val_check_interval: 0.5
+  precision: 16-mixed
+
+optimizer:
+  lr: 1.e-4
+
+model:
+  weights_path: null
+  encoder:
+    fpn_max_height: 256
+    freeze_mvs: false
+    freeze_backbone: false
+
+    # A off
+    backbone_position_embedding_type: "sine"
+    backbone_position_embedding_hidden_dim: null
+    backbone_use_feature_adapter: false
+    backbone_transformer_adapter_type: "none"
+    backbone_transformer_adapter_hidden_dim: null
+    backbone_transformer_adapter_cross_hidden_dim: null
+    backbone_transformer_adapter_kernel_size: 3
+    backbone_transformer_adapter_kernel_sizes: null
+    backbone_transformer_adapter_fusion: "weighted_sum"
+    backbone_transformer_adapter_use_pointwise: false
+    backbone_transformer_adapter_use_inner_residual: false
+    backbone_transformer_adapter_dropout: 0.1
+    backbone_trainable_modules: null
+    use_spherical_cost_volume_warp: false
+
+    # C off
+    geometry_reliability:
+      enable: false
+
+    gaussian_head:
+      deferred_blend: false
+      patchs_height: 1
+      patchs_width: 1
+
+      # B off
+      use_latlon_embedding: false
+      use_latitude_aware_conv: false
+      gaussian_adapter:
+        use_jacobian_aware_scale: false
+        use_jacobian_aware_basis: false
+
+      # C off
+      geo_condition:
+        enable: false
+
+dataset:
+  image_shape: [256, 512]
+  train_times_per_scene: 400
+  cache_images: false
+
+loss:
+  pyimage:
+    gaussian_head:
+      patchs_height: 1
+      patchs_width: 1
+      use_latlon_embedding: false
+      use_latitude_aware_conv: false
+      gaussian_adapter:
+        use_jacobian_aware_scale: false
+        use_jacobian_aware_basis: false
+      geo_condition:
+        enable: false
